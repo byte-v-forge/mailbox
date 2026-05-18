@@ -1,28 +1,16 @@
 # mailbox
 
-Mailbox 业务服务。
+Mailbox 领域仓。
 
-本仓库负责邮箱账号、邮件文件夹、邮件搜索/读取、邮件状态变更，以及 provider adapter 的内部实现。
+本仓当前承载从 `nb-register` 迁入的 Outlook 相关代码。
 
-## 当前实现
+## 目录
 
-- Go module：`github.com/byte-v-forge/mailbox`
-- 公共契约 adapter：`internal/adapters/grpc`
-- 核心应用服务：`internal/app`
-- 领域模型和端口：`internal/core`
-- 内存 store：`internal/app`
-- provider 私有契约：
-  - `proto/byte/v/forge/mailbox/internal/v1/mailbox_internal.proto`
-  - `proto/byte/v/forge/mailbox/providers/imap/v1/imap.proto`
-  - `proto/byte/v/forge/mailbox/providers/jmap/v1/jmap.proto`
-
-## 职责
-
-- 公共 mailbox 能力定义在 `contracts/mailbox`。
-- 维护业务内部契约和 provider 私有模型。
-- `EmailAccount` 表示邮箱账号；`MailFolder` 表示 INBOX、Archive、Trash、Junk 等容器。
-- `Mailbox` 保留给 IMAP/JMAP 的 mailbox/folder 概念，账号名称使用 `EmailAccount`。
-- 使用内部模型承载 OAuth token、cookie、IMAP 密码、provider raw response、验证码提取规则和注册业务流程引用。
+- `providers/outlook/imap-service`：Outlook Graph 邮件读取、邮箱账号存储、OTP 提取和 gRPC 服务。
+- `providers/outlook/register-service`：Outlook 邮箱注册、OAuth 获取和 gRPC 服务。
+- `proto/email.proto`：邮件读取服务契约。
+- `proto/mailbox_register.proto`：邮箱注册服务契约。
+- `proto/mail_dns.proto`：邮箱 DNS 管理契约。
 
 ## 生成
 
@@ -30,25 +18,11 @@ Mailbox 业务服务。
 sh scripts/generate-proto.sh
 ```
 
-脚本会先生成 `../contracts` 的本地 Go 代码，再生成本仓内部 proto。
-`gen/` 下的生成物是本地构建产物。
+生成物用于本地检查和镜像构建，不提交到仓库。
 
-## 测试
+## 检查
 
 ```sh
-go test ./...
-go vet ./...
+(cd providers/outlook/imap-service && go vet ./...)
+python3 -m py_compile providers/outlook/register-service/*.py
 ```
-
-## 贡献与安全
-
-- 贡献规则见 `CONTRIBUTING.md`。
-- 安全报告规则见 `SECURITY.md`。
-- 本仓使用 Apache-2.0 许可证。
-
-## 尚未实现
-
-- PostgreSQL 持久化 adapter。
-- 运行时配置加载和 secret 解析。
-- 进程入口和 gRPC server bootstrap。
-- 真实 IMAP/JMAP/Gmail/Graph provider adapter。
