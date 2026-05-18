@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package byte.v.forge.mailbox.internal.v1;
+
+import "byte/v/forge/contracts/mailbox/v1/account.proto";
+import "byte/v/forge/contracts/mailbox/v1/message.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+option csharp_namespace = "ByteVForge.Mailbox.Internal.V1";
+option go_package = "github.com/byte-v-forge/mailbox/gen/go/byte/v/forge/mailbox/internal/v1;mailboxinternalv1";
+option java_multiple_files = true;
+option java_outer_classname = "MailboxInternalProto";
+option java_package = "com.bytevforge.mailbox.internal.v1";
+option php_namespace = "ByteVForge\\Mailbox\\Internal\\V1";
+
+service MailboxProviderAdminService {
+  rpc UpsertProviderConfig(UpsertProviderConfigRequest) returns (UpsertProviderConfigResponse);
+  rpc GetProviderConfig(GetProviderConfigRequest) returns (GetProviderConfigResponse);
+  rpc ListProviderConfigs(ListProviderConfigsRequest) returns (ListProviderConfigsResponse);
+  rpc DeleteProviderConfig(DeleteProviderConfigRequest) returns (DeleteProviderConfigResponse);
+}
+
+message ProviderError {
+  byte.v.forge.contracts.mailbox.v1.MailboxError public_error = 1;
+  string provider_error_code = 2;
+  string raw_response = 3;
+}
+
+message MailboxProviderConfig {
+  string provider_config_id = 1;
+  string provider_key = 2;
+  string display_name = 3;
+  bool enabled = 4;
+  string endpoint = 5;
+  string credential_secret_ref = 6;
+  string proxy_ref = 7;
+  MailboxProviderCapabilities capabilities = 8;
+  map<string, string> labels = 20;
+  google.protobuf.Timestamp created_at = 30;
+  google.protobuf.Timestamp updated_at = 31;
+}
+
+message MailboxProviderCapabilities {
+  bool supports_folders = 1;
+  bool supports_search = 2;
+  bool supports_message_flags = 3;
+  bool supports_move = 4;
+  bool supports_delete = 5;
+  bool supports_push = 6;
+  bool supports_raw_mime = 7;
+  repeated string supported_domains = 20;
+}
+
+message ProviderEmailAccount {
+  byte.v.forge.contracts.mailbox.v1.EmailAccount public_account = 1;
+  string provider_config_id = 2;
+  string provider_key = 3;
+  string upstream_account_id = 4;
+  google.protobuf.Struct raw_metadata = 20;
+}
+
+message ProviderMailFolder {
+  byte.v.forge.contracts.mailbox.v1.MailFolder public_folder = 1;
+  string upstream_folder_id = 2;
+  string upstream_parent_folder_id = 3;
+  google.protobuf.Struct raw_metadata = 20;
+}
+
+message ProviderEmailMessage {
+  byte.v.forge.contracts.mailbox.v1.EmailMessage public_message = 1;
+  string upstream_message_id = 2;
+  string upstream_thread_id = 3;
+  string upstream_folder_id = 4;
+  google.protobuf.Struct raw_metadata = 20;
+}
+
+message UpsertProviderConfigRequest {
+  MailboxProviderConfig config = 1;
+}
+
+message UpsertProviderConfigResponse {
+  MailboxProviderConfig config = 1;
+  ProviderError error = 2;
+}
+
+message GetProviderConfigRequest {
+  string provider_config_id = 1;
+}
+
+message GetProviderConfigResponse {
+  MailboxProviderConfig config = 1;
+  ProviderError error = 2;
+}
+
+message ListProviderConfigsRequest {
+  bool include_disabled = 1;
+  string provider_key = 2;
+}
+
+message ListProviderConfigsResponse {
+  repeated MailboxProviderConfig configs = 1;
+  ProviderError error = 2;
+}
+
+message DeleteProviderConfigRequest {
+  string provider_config_id = 1;
+}
+
+message DeleteProviderConfigResponse {
+  ProviderError error = 1;
+}
