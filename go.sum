@@ -1,5 +1,5 @@
-github.com/byte-v-forge/contracts-go v0.1.0 h1:aiot3GjluNnhTbK5sCVPdJtuj40sI8WoH0JCe223Tl0=
-github.com/byte-v-forge/contracts-go v0.1.0/go.mod h1:y2YP2d0SuI66CWYxdkJx9FUmIJYXnAJXtGJiJGSip8E=
+github.com/byte-v-forge/contracts-go v0.3.0 h1:9I/4j3ObKwDZ6aWbpDyUHvClbDyz7sQx6UirPOuhf6s=
+github.com/byte-v-forge/contracts-go v0.3.0/go.mod h1:y2YP2d0SuI66CWYxdkJx9FUmIJYXnAJXtGJiJGSip8E=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
