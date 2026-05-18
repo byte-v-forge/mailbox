@@ -8,8 +8,10 @@ Mailbox 领域仓。
 
 - `providers/outlook/imap-service`：Outlook Graph 邮件读取、邮箱账号存储、OTP 提取和 gRPC 服务。
 - `providers/outlook/register-service`：Outlook 邮箱注册、OAuth 获取、邮箱存储同步和 gRPC 服务。
+- `services/mailbox-api`：Mailbox 领域 gRPC API，聚合邮箱注册、OAuth 和收件能力。
 - `proto/email.proto`：邮件读取服务契约。
 - `proto/mailbox_register.proto`：邮箱注册服务契约。
+- `proto/mailbox_service.proto`：Mailbox 领域 API 契约。
 - `proto/mail_dns.proto`：邮箱 DNS 管理契约。
 
 ## 生成
@@ -26,9 +28,12 @@ sh scripts/generate-proto.sh
 
 `OUTLOOK_REGISTER_ENABLE_OAUTH2` 控制注册流程是否同步获取 Outlook OAuth token；注册服务负责把账号和 OAuth 状态写入邮箱存储服务。
 
+`services/mailbox-api` 通过 `EMAIL_ADDR` 连接邮箱存储服务，通过 `MAILBOX_REGISTER_ADDR` 连接 Outlook 注册/OAuth 服务。
+
 ## 检查
 
 ```sh
 (cd providers/outlook/imap-service && go vet ./...)
+(cd services/mailbox-api && go build ./...)
 python3 -m py_compile providers/outlook/register-service/*.py
 ```

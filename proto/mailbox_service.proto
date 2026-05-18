@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package mailbox;
+
+import "email.proto";
+
+option go_package = "./;pb";
+
+service MailboxService {
+  rpc RegisterMailbox(RegisterMailboxRequest) returns (RegisterMailboxResponse);
+  rpc RunMailboxOAuth(StartMailboxOAuthRequest) returns (StartMailboxOAuthResponse);
+  rpc FetchMailboxInboxes(FetchMailboxInboxesRequest) returns (FetchMailboxInboxesResponse);
+}
+
+message RegisterMailboxRequest {
+  bool import_only = 1;
+}
+
+message RegisteredMailbox {
+  string email_address = 1;
+  string password = 2;
+  string refresh_token = 3;
+  string access_token = 4;
+  string status = 5;
+}
+
+message RegisterMailboxResponse {
+  string operation_id = 1;
+  bool success = 2;
+  int32 exit_code = 3;
+  string error_message = 4;
+  repeated RegisteredMailbox mailboxes = 5;
+}
+
+message StartMailboxOAuthRequest {
+  string email_address = 1;
+  bool only_missing = 2;
+  int32 limit = 3;
+}
+
+message StartMailboxOAuthResponse {
+  string operation_id = 1;
+  bool started = 2;
+  string error_message = 3;
+}
+
+message FetchMailboxInboxesRequest {
+  int32 limit_per_mailbox = 1;
+  int32 max_mailboxes = 2;
+  string email_address = 3;
+}
+
+message FetchMailboxInboxesResponse {
+  repeated email.FetchMailboxInboxResult results = 1;
+  int32 mailbox_count = 2;
+  int32 fetched_count = 3;
+  int32 failed_count = 4;
+  int32 message_count = 5;
+}

@@ -15,3 +15,4 @@ __pycache__/
 /providers/outlook/register-service/*_pb2_grpc.py
 /providers/outlook/register-service/.tmp_outlook_register/
 /providers/outlook/register-service/register-results/
+/services/mailbox-api/pb/
