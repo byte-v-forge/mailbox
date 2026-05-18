@@ -24,6 +24,8 @@ sh scripts/generate-proto.sh
 
 `providers/outlook/register-service` 通过 `MAILBOX_EMAIL_SERVICE_ADDR` 连接邮箱存储服务；默认读取 `EMAIL_ADDR`，内置地址为 `outlook-imap-service:50051`。
 
+`OUTLOOK_REGISTER_ENABLE_OAUTH2` 控制注册流程是否同步获取 Outlook OAuth token；注册服务负责把账号和 OAuth 状态写入邮箱存储服务。
+
 ## 检查
 
 ```sh
