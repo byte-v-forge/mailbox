@@ -21,6 +21,7 @@ import (
 
 type config struct {
 	listenAddr          string
+	pgDSN               string
 	emailAddr           string
 	mailboxRegisterAddr string
 }
@@ -30,6 +31,7 @@ type server struct {
 
 	emailClient           pb.EmailServiceClient
 	mailboxRegisterClient pb.MailboxRegistrationServiceClient
+	operations            *operationStore
 }
 
 func main() {
@@ -46,6 +48,11 @@ func main() {
 	}
 	defer registerConn.Close()
 
+	operations, err := newOperationStore(cfg.pgDSN)
+	if err != nil {
+		log.Fatalf("failed to initialize mailbox operation store: %v", err)
+	}
+
 	listener, err := net.Listen("tcp", cfg.listenAddr)
 	if err != nil {
 		log.Fatalf("failed to listen on %s: %v", cfg.listenAddr, err)
@@ -55,6 +62,7 @@ func main() {
 	pb.RegisterMailboxServiceServer(grpcServer, &server{
 		emailClient:           pb.NewEmailServiceClient(emailConn),
 		mailboxRegisterClient: pb.NewMailboxRegistrationServiceClient(registerConn),
+		operations:            operations,
 	})
 
 	log.Printf("mailbox API listening on %s", cfg.listenAddr)
@@ -66,6 +74,7 @@ func main() {
 func loadConfig() config {
 	return config{
 		listenAddr:          envDefault("LISTEN_ADDR", ":50051"),
+		pgDSN:               requiredEnvAny("MAILBOX_API_PG_DSN", "PG_DSN"),
 		emailAddr:           envDefault("EMAIL_ADDR", "outlook-imap-service:50051"),
 		mailboxRegisterAddr: envDefault("MAILBOX_REGISTER_ADDR", "outlook-register-service:50051"),
 	}
@@ -77,6 +86,16 @@ func envDefault(name string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func requiredEnvAny(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	log.Fatalf("%s is required", strings.Join(names, " or "))
+	return ""
 }
 
 func newGRPCClient(name string, addr string) (*grpc.ClientConn, error) {
@@ -133,14 +152,34 @@ func (s *server) DeleteMailbox(ctx context.Context, req *pb.DeleteMailboxRequest
 
 func (s *server) RegisterMailbox(ctx context.Context, req *pb.RegisterMailboxRequest) (*pb.RegisterMailboxResponse, error) {
 	operationID := operationID("mailbox-register")
+	if _, err := s.operations.create(ctx, operationID, operationActionRegisterMailbox, ""); err != nil {
+		return nil, status.Errorf(codes.Internal, "create mailbox operation: %v", err)
+	}
+	if _, err := s.operations.update(ctx, operationID, operationUpdate{
+		Status:   operationStatusRunning,
+		LastStep: "run_registration",
+	}); err != nil {
+		return nil, status.Errorf(codes.Internal, "mark mailbox operation running: %v", err)
+	}
+
 	resp, err := s.mailboxRegisterClient.RunMailboxRegistration(ctx, &pb.RunMailboxRegistrationRequest{
 		Enabled:    !req.GetImportOnly(),
 		ImportOnly: req.GetImportOnly(),
 	})
 	if err != nil {
+		s.updateOperation(ctx, operationID, operationUpdate{
+			Status:       operationStatusFailed,
+			LastStep:     "run_registration",
+			ErrorMessage: err.Error(),
+		})
 		return nil, status.Errorf(codes.Unavailable, "run mailbox registration: %v", err)
 	}
 	if resp == nil {
+		s.updateOperation(ctx, operationID, operationUpdate{
+			Status:       operationStatusFailed,
+			LastStep:     "run_registration",
+			ErrorMessage: "mailbox registration service returned empty response",
+		})
 		return nil, status.Error(codes.Internal, "mailbox registration service returned empty response")
 	}
 
@@ -167,22 +206,66 @@ func (s *server) RegisterMailbox(ctx context.Context, req *pb.RegisterMailboxReq
 	if !out.GetSuccess() && out.GetErrorMessage() == "" {
 		out.ErrorMessage = "mailbox registration failed"
 	}
+	statusValue := operationStatusSucceeded
+	if !out.GetSuccess() || strings.TrimSpace(out.GetErrorMessage()) != "" {
+		statusValue = operationStatusFailed
+	}
+	s.updateOperation(ctx, operationID, operationUpdate{
+		Status:       statusValue,
+		LastStep:     "run_registration",
+		ErrorMessage: out.GetErrorMessage(),
+		ExitCode:     out.GetExitCode(),
+		MailboxCount: int32(len(out.GetMailboxes())),
+	})
 	return out, nil
 }
 
 func (s *server) RunMailboxOAuth(ctx context.Context, req *pb.StartMailboxOAuthRequest) (*pb.StartMailboxOAuthResponse, error) {
 	operationID := operationID("mailbox-oauth")
+	email := normalizeEmail(req.GetEmailAddress())
+	if _, err := s.operations.create(ctx, operationID, operationActionMailboxOAuth, email); err != nil {
+		return nil, status.Errorf(codes.Internal, "create mailbox operation: %v", err)
+	}
+	if _, err := s.operations.update(ctx, operationID, operationUpdate{
+		Status:   operationStatusRunning,
+		LastStep: "run_oauth",
+	}); err != nil {
+		return nil, status.Errorf(codes.Internal, "mark mailbox operation running: %v", err)
+	}
+
 	resp, err := s.mailboxRegisterClient.RunMailboxOAuth(ctx, &pb.RunMailboxOAuthRequest{
-		EmailAddress: normalizeEmail(req.GetEmailAddress()),
+		EmailAddress: email,
 		OnlyMissing:  req.GetOnlyMissing(),
 		Limit:        normalizedLimit(req.GetLimit()),
 	})
 	if err != nil {
+		s.updateOperation(ctx, operationID, operationUpdate{
+			Status:       operationStatusFailed,
+			LastStep:     "run_oauth",
+			ErrorMessage: err.Error(),
+		})
 		return &pb.StartMailboxOAuthResponse{OperationId: operationID, ErrorMessage: err.Error()}, nil
 	}
 	if resp == nil {
+		s.updateOperation(ctx, operationID, operationUpdate{
+			Status:       operationStatusFailed,
+			LastStep:     "run_oauth",
+			ErrorMessage: "mailbox registration service returned empty OAuth response",
+		})
 		return &pb.StartMailboxOAuthResponse{OperationId: operationID, ErrorMessage: "mailbox registration service returned empty OAuth response"}, nil
 	}
+	statusValue := operationStatusSucceeded
+	if !resp.GetSuccess() || strings.TrimSpace(resp.GetErrorMessage()) != "" {
+		statusValue = operationStatusFailed
+	}
+	s.updateOperation(ctx, operationID, operationUpdate{
+		Status:       statusValue,
+		LastStep:     "run_oauth",
+		ErrorMessage: resp.GetErrorMessage(),
+		MailboxCount: resp.GetProcessed(),
+		FetchedCount: resp.GetSucceeded(),
+		FailedCount:  resp.GetFailed(),
+	})
 	return &pb.StartMailboxOAuthResponse{
 		OperationId:  operationID,
 		Started:      resp.GetSuccess(),
@@ -191,24 +274,90 @@ func (s *server) RunMailboxOAuth(ctx context.Context, req *pb.StartMailboxOAuthR
 }
 
 func (s *server) FetchMailboxInboxes(ctx context.Context, req *pb.FetchMailboxInboxesRequest) (*pb.FetchMailboxInboxesResponse, error) {
+	operationID := operationID("mailbox-inbox")
+	email := normalizeEmail(req.GetEmailAddress())
+	if _, err := s.operations.create(ctx, operationID, operationActionFetchInboxes, email); err != nil {
+		return nil, status.Errorf(codes.Internal, "create mailbox operation: %v", err)
+	}
+	if _, err := s.operations.update(ctx, operationID, operationUpdate{
+		Status:   operationStatusRunning,
+		LastStep: "fetch_inboxes",
+	}); err != nil {
+		return nil, status.Errorf(codes.Internal, "mark mailbox operation running: %v", err)
+	}
+
 	resp, err := s.emailClient.FetchInboxes(ctx, &pb.FetchInboxesRequest{
 		LimitPerMailbox: req.GetLimitPerMailbox(),
 		MaxMailboxes:    req.GetMaxMailboxes(),
-		EmailAddress:    normalizeEmail(req.GetEmailAddress()),
+		EmailAddress:    email,
 	})
 	if err != nil {
+		s.updateOperation(ctx, operationID, operationUpdate{
+			Status:       operationStatusFailed,
+			LastStep:     "fetch_inboxes",
+			ErrorMessage: err.Error(),
+		})
 		return nil, status.Errorf(codes.Unavailable, "fetch mailbox inboxes: %v", err)
 	}
 	if resp == nil {
+		s.updateOperation(ctx, operationID, operationUpdate{
+			Status:       operationStatusFailed,
+			LastStep:     "fetch_inboxes",
+			ErrorMessage: "email service returned empty inbox response",
+		})
 		return nil, status.Error(codes.Internal, "email service returned empty inbox response")
 	}
+	statusValue := operationStatusSucceeded
+	if resp.GetFailedCount() > 0 {
+		statusValue = operationStatusFailed
+	}
+	s.updateOperation(ctx, operationID, operationUpdate{
+		Status:       statusValue,
+		LastStep:     "fetch_inboxes",
+		MailboxCount: resp.GetMailboxCount(),
+		FetchedCount: resp.GetFetchedCount(),
+		FailedCount:  resp.GetFailedCount(),
+		MessageCount: resp.GetMessageCount(),
+	})
 	return &pb.FetchMailboxInboxesResponse{
 		Results:      resp.GetResults(),
 		MailboxCount: resp.GetMailboxCount(),
 		FetchedCount: resp.GetFetchedCount(),
 		FailedCount:  resp.GetFailedCount(),
 		MessageCount: resp.GetMessageCount(),
+		OperationId:  operationID,
 	}, nil
+}
+
+func (s *server) GetMailboxOperation(ctx context.Context, req *pb.GetMailboxOperationRequest) (*pb.GetMailboxOperationResponse, error) {
+	operationID := strings.TrimSpace(req.GetOperationId())
+	if operationID == "" {
+		return &pb.GetMailboxOperationResponse{ErrorMessage: "operation_id is required"}, nil
+	}
+	operation, err := s.operations.get(ctx, operationID)
+	if err != nil {
+		return &pb.GetMailboxOperationResponse{ErrorMessage: err.Error()}, nil
+	}
+	return &pb.GetMailboxOperationResponse{Operation: operation}, nil
+}
+
+func (s *server) ListMailboxOperations(ctx context.Context, req *pb.ListMailboxOperationsRequest) (*pb.ListMailboxOperationsResponse, error) {
+	operations, err := s.operations.list(ctx, operationListFilter{
+		Limit:        int(req.GetLimit()),
+		Status:       req.GetStatus(),
+		Action:       req.GetAction(),
+		EmailAddress: req.GetEmailAddress(),
+	})
+	if err != nil {
+		return &pb.ListMailboxOperationsResponse{ErrorMessage: err.Error()}, nil
+	}
+	return &pb.ListMailboxOperationsResponse{Operations: operations}, nil
+}
+
+func (s *server) updateOperation(ctx context.Context, operationID string, update operationUpdate) {
+	if _, err := s.operations.update(ctx, operationID, update); err != nil {
+		log.Printf("update mailbox operation failed operation=%s: %v", operationID, err)
+	}
 }
 
 func normalizeEmail(value string) string {

@@ -13,6 +13,8 @@ service MailboxService {
   rpc RegisterMailbox(RegisterMailboxRequest) returns (RegisterMailboxResponse);
   rpc RunMailboxOAuth(StartMailboxOAuthRequest) returns (StartMailboxOAuthResponse);
   rpc FetchMailboxInboxes(FetchMailboxInboxesRequest) returns (FetchMailboxInboxesResponse);
+  rpc GetMailboxOperation(GetMailboxOperationRequest) returns (GetMailboxOperationResponse);
+  rpc ListMailboxOperations(ListMailboxOperationsRequest) returns (ListMailboxOperationsResponse);
 }
 
 message RegisterMailboxRequest {
@@ -59,4 +61,42 @@ message FetchMailboxInboxesResponse {
   int32 fetched_count = 3;
   int32 failed_count = 4;
   int32 message_count = 5;
+  string operation_id = 6;
+}
+
+message MailboxOperation {
+  string operation_id = 1;
+  string action = 2;
+  string status = 3;
+  string email_address = 4;
+  string last_step = 5;
+  string error_message = 6;
+  int32 exit_code = 7;
+  int32 mailbox_count = 8;
+  int32 fetched_count = 9;
+  int32 failed_count = 10;
+  int32 message_count = 11;
+  int64 created_at = 12;
+  int64 updated_at = 13;
+}
+
+message GetMailboxOperationRequest {
+  string operation_id = 1;
+}
+
+message GetMailboxOperationResponse {
+  MailboxOperation operation = 1;
+  string error_message = 2;
+}
+
+message ListMailboxOperationsRequest {
+  int32 limit = 1;
+  string status = 2;
+  string action = 3;
+  string email_address = 4;
+}
+
+message ListMailboxOperationsResponse {
+  repeated MailboxOperation operations = 1;
+  string error_message = 2;
 }
