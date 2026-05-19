@@ -19,13 +19,6 @@ import (
 	"outlookimapservice/pb"
 )
 
-type cachedOTP struct {
-	OTP         string
-	Subject     string
-	SourceEmail string
-	ReceivedAt  float64
-}
-
 type oauthEntry struct {
 	refreshToken string
 	manager      *OAuthManager
@@ -40,8 +33,6 @@ type MailWatcher struct {
 	httpClient   *http.Client
 
 	mu            sync.Mutex
-	cachedOTPs    map[string]cachedOTP
-	seenMessages  map[string]float64
 	oauthManagers map[string]oauthEntry
 }
 
@@ -94,35 +85,8 @@ func NewMailWatcher(store *MailboxStore) *MailWatcher {
 		pollInterval:  pollInterval,
 		inboxOverlap:  inboxOverlap,
 		httpClient:    &http.Client{Timeout: time.Duration(timeout) * time.Second},
-		cachedOTPs:    map[string]cachedOTP{},
-		seenMessages:  map[string]float64{},
 		oauthManagers: map[string]oauthEntry{},
 	}
-}
-
-func (w *MailWatcher) ConsumeCachedOTP(email string, subjectKeyword string, issuedAfter float64) (string, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.cleanupLocked()
-
-	key := normalizeEmail(email)
-	cached, ok := w.cachedOTPs[key]
-	if !ok {
-		key = canonicalEmail(email)
-		cached, ok = w.cachedOTPs[key]
-	}
-	if !ok {
-		return "", false
-	}
-	if !containsFold(cached.Subject, subjectKeyword) {
-		return "", false
-	}
-	if issuedAfter > 0 && cached.ReceivedAt < issuedAfter {
-		return "", false
-	}
-	delete(w.cachedOTPs, key)
-	logInfo("served cached OTP for %s", redactEmail(email))
-	return cached.OTP, true
 }
 
 func (w *MailWatcher) PollForEmail(ctx context.Context, email string) error {
@@ -134,8 +98,8 @@ func (w *MailWatcher) PollForEmail(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
-	w.processMessages(ctx, mailbox.GetEmailAddress(), messages)
-	return nil
+	_, err = w.store.RecordInboxMessages(ctx, mailbox.GetEmailAddress(), messages)
+	return err
 }
 
 func (w *MailWatcher) FetchMailboxInbox(ctx context.Context, mailbox *pb.EmailMailbox, limit int32) ([]*pb.EmailInboxMessage, error) {
@@ -160,7 +124,7 @@ func (w *MailWatcher) FetchMailboxInbox(ctx context.Context, mailbox *pb.EmailMa
 	if err != nil {
 		return nil, err
 	}
-	w.processMessages(ctx, mailbox.GetEmailAddress(), unseen)
+	_ = unseen
 	return w.store.ListInboxMessages(ctx, mailbox.GetEmailAddress(), int32(messageLimit))
 }
 
@@ -295,70 +259,6 @@ func (w *MailWatcher) fetchOnce(ctx context.Context, accessToken string, limit i
 	return decoded.Value, nil
 }
 
-func (w *MailWatcher) processMessages(ctx context.Context, sourceEmail string, messages []graphMessage) {
-	cachedMessages := 0
-	cachedRecipients := 0
-	for _, msg := range messages {
-		msgKey := sourceEmail + ":" + messageKey(msg)
-		w.mu.Lock()
-		if _, ok := w.seenMessages[msgKey]; ok {
-			w.mu.Unlock()
-			continue
-		}
-		w.seenMessages[msgKey] = float64(time.Now().Unix())
-		w.mu.Unlock()
-
-		receivedAt := parseGraphTime(msg.ReceivedDateTime)
-		recipients := messageAddresses(msg)
-		if len(recipients) == 0 {
-			continue
-		}
-		body := msg.BodyPreview + "\n" + msg.Body.Content
-		otp := extractOTP(body)
-		if otp == "" {
-			continue
-		}
-		if receivedAt == 0 {
-			receivedAt = float64(time.Now().Unix())
-		}
-		if cached := w.cacheOTP(msg.Subject, otp, recipients, receivedAt); cached > 0 {
-			cachedMessages++
-			cachedRecipients += cached
-		}
-		if w.store != nil {
-			for _, recipient := range recipients {
-				if err := w.store.UpsertLatestOTP(ctx, recipient, otp, msg.Subject, sourceEmail, int64(receivedAt)); err != nil {
-					logWarning("failed to persist latest otp for %s: %v", redactEmail(recipient), err)
-				}
-			}
-		}
-	}
-	if cachedMessages > 0 {
-		logInfo("cached OTP from %d message(s) for %d recipient(s)", cachedMessages, cachedRecipients)
-	}
-}
-
-func (w *MailWatcher) cacheOTP(subject string, otp string, recipients []string, receivedAt float64) int {
-	recipients = uniqueStrings(recipients)
-	if len(recipients) == 0 {
-		return 0
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, recipient := range recipients {
-		key := normalizeEmail(recipient)
-		if key != "" {
-			w.cachedOTPs[key] = cachedOTP{
-				OTP:         otp,
-				Subject:     subject,
-				SourceEmail: recipient,
-				ReceivedAt:  receivedAt,
-			}
-		}
-	}
-	return len(recipients)
-}
-
 func inboxMessages(mailboxEmail string, messages []graphMessage) []*pb.EmailInboxMessage {
 	out := make([]*pb.EmailInboxMessage, 0, len(messages))
 	for _, msg := range messages {
@@ -374,14 +274,16 @@ func inboxMessage(mailboxEmail string, msg graphMessage) *pb.EmailInboxMessage {
 	}
 	body := msg.BodyPreview + "\n" + msg.Body.Content
 	return &pb.EmailInboxMessage{
-		Id:             msg.ID,
-		MailboxEmail:   normalizeEmail(mailboxEmail),
-		Subject:        strings.TrimSpace(msg.Subject),
-		FromAddress:    strings.TrimSpace(msg.From.EmailAddress.Address),
-		BodyPreview:    compactMessageText(bodyPreview, 500),
-		ReceivedAtUnix: int64(parseGraphTime(msg.ReceivedDateTime)),
-		Recipients:     uniqueStrings(messageAddresses(msg)),
-		Otp:            extractOTP(body),
+		Id:                 msg.ID,
+		MailboxEmail:       normalizeEmail(mailboxEmail),
+		Subject:            strings.TrimSpace(msg.Subject),
+		FromAddress:        strings.TrimSpace(msg.From.EmailAddress.Address),
+		BodyPreview:        compactMessageText(bodyPreview, 500),
+		ReceivedAtUnix:     int64(parseGraphTime(msg.ReceivedDateTime)),
+		Recipients:         uniqueStrings(messageAddresses(msg)),
+		Provider:           emailProviderOutlook,
+		SourceMailboxEmail: normalizeEmail(mailboxEmail),
+		BodyText:           compactMessageText(body, 5000),
 	}
 }
 
@@ -437,20 +339,6 @@ func inboxReceivedAfter(watermarkNs int64, overlapSeconds int) int64 {
 		return 0
 	}
 	return after
-}
-
-func (w *MailWatcher) cleanupLocked() {
-	now := float64(time.Now().Unix())
-	for key, cached := range w.cachedOTPs {
-		if now-cached.ReceivedAt > 600 {
-			delete(w.cachedOTPs, key)
-		}
-	}
-	for key, seenAt := range w.seenMessages {
-		if now-seenAt > 3600 {
-			delete(w.seenMessages, key)
-		}
-	}
 }
 
 func retryAfter(value string) time.Duration {

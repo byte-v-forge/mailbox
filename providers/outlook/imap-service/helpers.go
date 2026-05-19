@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"html"
 	"math/big"
 	"os"
 	"regexp"
@@ -14,6 +13,9 @@ import (
 
 const (
 	defaultListenAddr          = ":50051"
+	defaultFRPConfigFile       = "/etc/frp/frpc.toml"
+	defaultFRPBinary           = "frpc"
+	defaultWebhookTokenHeader  = "X-Webhook-Token"
 	defaultOAuthClientID       = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 	defaultOAuthScope          = "https://graph.microsoft.com/Mail.Read"
 	defaultTokenURL            = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -23,18 +25,16 @@ const (
 	defaultHTTPTimeoutSeconds  = 20
 	defaultInboxOverlapSeconds = 120
 	defaultAliasTokenLength    = 6
+	defaultWebhookMaxMailboxes = 100
+	defaultWebhookTimeout      = 60
 )
 
 const (
-	statusAvailable         = "AVAILABLE"
-	statusAssigned          = "ASSIGNED"
-	statusRegistered        = "REGISTERED"
-	statusOAuthPending      = "OAUTH_PENDING"
-	statusUserAlreadyExists = "USER_ALREADY_EXISTS"
-	statusAuthFailed        = "AUTH_FAILED"
-	statusNeedsManualVerify = "NEEDS_MANUAL_VERIFICATION"
-	statusBlocked           = "BLOCKED"
+	emailProviderOutlook    = "outlook"
+	emailProviderCloudflare = "cloudflare"
+)
 
+const (
 	authStatusAuthorized        = "AUTHORIZED"
 	authStatusOAuthPending      = "OAUTH_PENDING"
 	authStatusAuthFailed        = "AUTH_FAILED"
@@ -42,7 +42,6 @@ const (
 )
 
 var (
-	otpPattern     = regexp.MustCompile(`(^|[^0-9])([0-9]{6})([^0-9]|$)`)
 	emailPattern   = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
 	htmlTagPattern = regexp.MustCompile(`<[^>]+>`)
 )
@@ -65,6 +64,21 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func normalizeScope(value string) string {
@@ -101,17 +115,6 @@ func containsFold(value string, keyword string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(value), strings.ToLower(keyword))
-}
-
-func extractOTP(body string) string {
-	body = html.UnescapeString(body)
-	body = strings.ReplaceAll(body, "\u00a0", " ")
-	body = htmlTagPattern.ReplaceAllString(body, " ")
-	match := otpPattern.FindStringSubmatch(body)
-	if len(match) < 3 {
-		return ""
-	}
-	return match[2]
 }
 
 func parseGraphTime(value string) float64 {

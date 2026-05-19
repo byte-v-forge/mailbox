@@ -53,7 +53,7 @@ func (s *EmailService) UpsertMailbox(ctx context.Context, request *pb.UpsertEmai
 }
 
 func (s *EmailService) ListMailboxes(ctx context.Context, request *pb.ListEmailMailboxesRequest) (*pb.ListEmailMailboxesResponse, error) {
-	mailboxes, err := s.store.ListMailboxes(ctx, request.GetStatus(), request.GetLimit())
+	mailboxes, err := s.store.ListMailboxes(ctx, request.GetAuthStatus(), request.GetLimit())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -138,12 +138,8 @@ func (s *EmailService) WaitForEmail(ctx context.Context, request *pb.WaitForEmai
 	}
 	email := request.GetEmailAddress()
 	issuedAfterUnix := request.GetIssuedAfterUnix()
-	logInfo("waiting for email otp email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(email), timeoutSeconds, issuedAfterUnix)
-	issuedAfter := float64(request.GetIssuedAfterUnix())
-	if otp, ok := s.watcher.ConsumeCachedOTP(email, request.GetSubjectKeyword(), issuedAfter); ok {
-		return &pb.WaitForEmailResponse{Found: true, ContentExtracted: otp}, nil
-	}
-	if resp, ok, err := s.latestOTPResponse(ctx, request, issuedAfterUnix); err != nil {
+	logInfo("waiting for email message email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(email), timeoutSeconds, issuedAfterUnix)
+	if resp, ok, err := s.latestEmailResponse(ctx, request, issuedAfterUnix); err != nil {
 		return nil, waitError(ctx, err)
 	} else if ok {
 		return resp, nil
@@ -152,10 +148,8 @@ func (s *EmailService) WaitForEmail(ctx context.Context, request *pb.WaitForEmai
 		if !isAuthError(err) {
 			return nil, waitError(ctx, err)
 		}
-		logWarning("email otp poll auth error email=%s error=%v", redactEmail(email), err)
-	} else if otp, ok := s.watcher.ConsumeCachedOTP(email, request.GetSubjectKeyword(), issuedAfter); ok {
-		return &pb.WaitForEmailResponse{Found: true, ContentExtracted: otp}, nil
-	} else if resp, ok, err := s.latestOTPResponse(ctx, request, issuedAfterUnix); err != nil {
+		logWarning("email poll auth error email=%s error=%v", redactEmail(email), err)
+	} else if resp, ok, err := s.latestEmailResponse(ctx, request, issuedAfterUnix); err != nil {
 		return nil, waitError(ctx, err)
 	} else if ok {
 		return resp, nil
@@ -182,26 +176,23 @@ func (s *EmailService) WaitForEmail(ctx context.Context, request *pb.WaitForEmai
 			}
 			continue
 		}
-		if otp, ok := s.watcher.ConsumeCachedOTP(email, request.GetSubjectKeyword(), issuedAfter); ok {
-			return &pb.WaitForEmailResponse{Found: true, ContentExtracted: otp}, nil
-		}
-		if resp, ok, err := s.latestOTPResponse(ctx, request, issuedAfterUnix); err != nil {
+		if resp, ok, err := s.latestEmailResponse(ctx, request, issuedAfterUnix); err != nil {
 			return nil, waitError(ctx, err)
 		} else if ok {
 			return resp, nil
 		}
 	}
-	logInfo("email otp not found email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(email), timeoutSeconds, issuedAfterUnix)
+	logInfo("email message not found email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(email), timeoutSeconds, issuedAfterUnix)
 	return &pb.WaitForEmailResponse{Found: false}, nil
 }
 
-func (s *EmailService) latestOTPResponse(ctx context.Context, request *pb.WaitForEmailRequest, issuedAfterUnix int64) (*pb.WaitForEmailResponse, bool, error) {
-	otp, receivedAt, ok, err := s.store.LatestOTP(ctx, request.GetEmailAddress(), request.GetSubjectKeyword(), issuedAfterUnix)
+func (s *EmailService) latestEmailResponse(ctx context.Context, request *pb.WaitForEmailRequest, issuedAfterUnix int64) (*pb.WaitForEmailResponse, bool, error) {
+	message, ok, err := s.store.LatestMessage(ctx, request.GetEmailAddress(), request.GetSubjectKeyword(), issuedAfterUnix)
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	logInfo("served persisted latest OTP for %s received_at_unix=%d", redactEmail(request.GetEmailAddress()), receivedAt)
-	return &pb.WaitForEmailResponse{Found: true, ContentExtracted: otp}, true, nil
+	logInfo("served persisted email for %s provider=%s received_at_unix=%d", redactEmail(request.GetEmailAddress()), message.GetProvider(), message.GetReceivedAtUnix())
+	return &pb.WaitForEmailResponse{Found: true, Message: message}, true, nil
 }
 
 func waitError(ctx context.Context, err error) error {

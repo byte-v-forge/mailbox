@@ -29,11 +29,17 @@ func main() {
 	watcher := NewMailWatcher(store)
 	server := grpc.NewServer()
 	pb.RegisterEmailServiceServer(server, &EmailService{store: store, watcher: watcher})
+	errCh := make(chan error, 3)
 
 	listenAddr := grpcListenAddr(envStr("LISTEN_ADDR", defaultListenAddr))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		log.Fatalf("listen on %s: %v", listenAddr, err)
+	}
+
+	startWebhookServer(ctx, envStr("WEBHOOK_HTTP_ADDR", ""), store, watcher, errCh)
+	if err := startFRP(ctx, errCh); err != nil {
+		log.Fatalf("initialize embedded frpc: %v", err)
 	}
 
 	go func() {
@@ -42,9 +48,21 @@ func main() {
 		server.GracefulStop()
 	}()
 
-	logInfo("Starting Go Outlook mail gRPC server on %s", listenAddr)
-	if err := server.Serve(listener); err != nil {
-		log.Fatalf("serve grpc: %v", err)
+	go func() {
+		logInfo("Starting Go Outlook mail gRPC server on %s", listenAddr)
+		if err := server.Serve(listener); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			errCh <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		stop()
+		log.Fatalf("runtime error: %v", err)
 	}
 }
 

@@ -1,3 +1,6 @@
+ARG FRP_VERSION=v0.61.1
+FROM docker.io/fatedier/frpc:${FRP_VERSION} AS frpc
+
 FROM docker.m.daocloud.io/library/golang:1.26-alpine AS builder
 
 WORKDIR /app
@@ -27,7 +30,8 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 WORKDIR /app
 COPY --from=builder /app/outlook-imap-service .
+COPY --from=frpc /usr/bin/frpc /usr/local/bin/frpc
 
-EXPOSE 50051
+EXPOSE 50051 8080
 
 CMD ["./outlook-imap-service"]

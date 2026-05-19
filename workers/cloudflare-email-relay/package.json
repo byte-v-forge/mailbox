@@ -1,0 +1,17 @@
+{
+  "name": "cloudflare-email-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "html-to-text": "^10.0.0",
+    "postal-mime": "^2.7.4"
+  },
+  "devDependencies": {
+    "wrangler": "^4.87.0"
+  }
+}

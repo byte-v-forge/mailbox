@@ -6,8 +6,9 @@ Mailbox 领域仓。
 
 ## 目录
 
-- `providers/outlook/imap-service`：Outlook Graph 邮件读取、邮箱账号存储、OTP 提取和 gRPC 服务。
+- `providers/outlook/imap-service`：Outlook Graph 邮件读取、邮箱账号存储、统一邮件 webhook 和 gRPC 服务。
 - `services/mailbox-api`：Mailbox 领域 gRPC API，内置邮箱注册导入、Outlook OAuth 编排和收件能力，通过 `browser-automation` 执行浏览器步骤。
+- `workers/cloudflare-email-relay`：Cloudflare Email Routing Worker，将 CF 入站邮件转发到 mailbox webhook。
 - `proto/email.proto`：邮件读取服务契约。
 - `proto/mailbox_register.proto`：邮箱注册与 OAuth 编排模型。
 - `proto/mailbox_service.proto`：Mailbox 领域 API 契约。

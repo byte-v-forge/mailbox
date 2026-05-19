@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-email-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-05-13",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true,
+  "vars": {
+    "MAILBOX_WEBHOOK_URL": "https://hook.pood1e.space/webhooks/email/cloudflare",
+    "WEBHOOK_FAIL_OPEN": "false"
+  }
+}
