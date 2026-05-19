@@ -20,10 +20,23 @@ if [[ -z "$mailbox_pg_dsn" ]]; then
 fi
 
 outlook_addr=${MAILBOX_OUTLOOK_INTERNAL_ADDR:-127.0.0.1:50052}
+webhook_addr=${MAILBOX_WEBHOOK_HTTP_ADDR:-:8082}
+frpc_config_file=${MAILBOX_FRPC_CONFIG_FILE:-/etc/frp/frpc.toml}
+frpc_enable=${MAILBOX_FRPC_ENABLE:-false}
+
+if [[ -n "${MAILBOX_FRPC_CONFIG:-}" ]]; then
+  mkdir -p "$(dirname "$frpc_config_file")"
+  printf '%s\n' "$MAILBOX_FRPC_CONFIG" > "$frpc_config_file"
+  unset MAILBOX_FRPC_CONFIG
+  frpc_enable=true
+fi
 
 (
   export LISTEN_ADDR="$outlook_addr"
   export PG_DSN="$mailbox_pg_dsn"
+  export WEBHOOK_HTTP_ADDR="$webhook_addr"
+  export FRP_ENABLE="$frpc_enable"
+  export FRP_CONFIG_FILE="$frpc_config_file"
   exec /app/bin/outlook-mailbox
 ) &
 pids+=("$!")

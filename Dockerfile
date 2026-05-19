@@ -49,7 +49,8 @@ RUN mkdir -p pb \
 FROM docker.m.daocloud.io/library/alpine:latest
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
-    && apk add --no-cache bash ca-certificates
+    && apk add --no-cache bash ca-certificates \
+    && mkdir -p /etc/frp
 
 WORKDIR /app
 COPY --from=outlook_builder /out/outlook-mailbox /app/bin/outlook-mailbox
@@ -58,5 +59,5 @@ COPY --from=frpc /usr/bin/frpc /usr/local/bin/frpc
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-EXPOSE 50051
+EXPOSE 50051 8082
 CMD ["/app/entrypoint.sh"]

@@ -6,8 +6,9 @@ export default {
     return new Response("cloudflare-email-relay worker is running", { status: 200 });
   },
 
-  async email(message, env) {
+  async email(message, env, ctx) {
     const event = await buildEmailEvent(message);
+    notifyTelegram(ctx, env, event);
     const ok = await forwardEmailEvent(env, event);
     if (!ok && env.WEBHOOK_FAIL_OPEN !== "true") {
       message.setReject("mailbox webhook delivery failed");
@@ -73,6 +74,75 @@ async function forwardEmailEvent(env, event) {
     return false;
   }
   return true;
+}
+
+function notifyTelegram(ctx, env, event) {
+  if (!telegramEnabled(env)) return;
+  const task = sendTelegramMessage(env, event).catch((error) => {
+    console.error(`telegram notification error: ${error?.message || error}`);
+  });
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(task);
+  }
+}
+
+function telegramEnabled(env) {
+  return cleanConfig(env.TELEGRAM_BOT_TOKEN) !== "" && cleanConfig(env.TELEGRAM_CHAT_ID) !== "";
+}
+
+async function sendTelegramMessage(env, event) {
+  const token = cleanConfig(env.TELEGRAM_BOT_TOKEN);
+  const chatId = cleanConfig(env.TELEGRAM_CHAT_ID);
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: telegramText(event),
+      disable_web_page_preview: true,
+    }),
+  });
+  if (!response.ok) {
+    console.error(`telegram notification failed status=${response.status} body=${await response.text()}`);
+  }
+}
+
+function telegramText(event) {
+  const header = [
+    "Cloudflare email received",
+    `From: ${event.fromAddress || "-"}`,
+    `To: ${event.recipients.join(", ") || "-"}`,
+    `Subject: ${event.subject || "-"}`,
+    `Message-ID: ${event.messageId || "-"}`,
+  ].join("\n");
+  const body = limit(event.textBody || htmlToPlainText(event.htmlBody) || "(empty body)");
+  return `${header}\n\n${body}`;
+}
+
+function htmlToPlainText(value) {
+  if (!value) return "";
+  return clean(
+    convert(String(value), {
+      wordwrap: false,
+      selectors: [
+        { selector: "img", format: "skip" },
+        { selector: "style", format: "skip" },
+        { selector: "script", format: "skip" },
+        { selector: "head", format: "skip" },
+        { selector: "a", options: { ignoreHref: true } },
+      ],
+    }),
+  );
+}
+
+function cleanConfig(value) {
+  return String(value || "").trim();
+}
+
+function limit(value, maxLength = 3900) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}\n\n... truncated`;
 }
 
 function clean(value) {

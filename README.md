@@ -27,6 +27,8 @@ sh scripts/generate-proto.sh
 
 `services/mailbox-api` 通过 `MAILBOX_EMAIL_PROVIDER_ADDR` 连接邮箱存储 provider，并通过 `MAILBOX_PG_DSN` 维护邮箱操作状态投影。注册和 OAuth 流程由 mailbox workflow worker 执行，使用 `WORKFLOW_RUNTIME_ADDRESS`、`WORKFLOW_RUNTIME_NAMESPACE`、`WORKFLOW_RUNTIME_TASK_QUEUE` 和 `WORKFLOW_RUNTIME_IDENTITY` 连接运行时。
 
+Cloudflare Email Routing Worker 通过 `/webhooks/email/cloudflare` 写入邮箱入站事件，mailbox 服务使用 `MAILBOX_WEBHOOK_HTTP_ADDR` 开启 HTTP webhook，使用 `MAILBOX_WEBHOOK_TOKEN` 校验转发请求。需要反向隧道时，通过 `MAILBOX_FRPC_CONFIG` 写入 frpc 配置并自动启动 frpc。
+
 ## 检查
 
 ```sh

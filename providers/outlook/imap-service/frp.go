@@ -6,17 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 )
 
 func startFRP(ctx context.Context, errCh chan<- error) error {
 	if !envBool("FRP_ENABLE", false) {
 		return nil
 	}
-	if strings.TrimSpace(os.Getenv("FRP_AUTH_TOKEN")) == "" {
-		return errors.New("FRP_AUTH_TOKEN is required when FRP_ENABLE=true")
-	}
-
 	configFile := envStr("FRP_CONFIG_FILE", defaultFRPConfigFile)
 	if _, err := os.Stat(configFile); err != nil {
 		return fmt.Errorf("read FRP_CONFIG_FILE %s: %w", configFile, err)
