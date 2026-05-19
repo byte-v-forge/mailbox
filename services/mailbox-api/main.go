@@ -102,9 +102,9 @@ func loadConfig() config {
 	}
 	return config{
 		listenAddr:          envDefault("LISTEN_ADDR", ":50051"),
-		pgDSN:               requiredEnvAny("MAILBOX_API_PG_DSN", "PG_DSN"),
-		emailAddr:           envDefault("EMAIL_ADDR", "outlook-imap-service:50051"),
-		mailboxRegisterAddr: envDefault("MAILBOX_REGISTER_ADDR", "outlook-register-service:50051"),
+		pgDSN:               requiredEnv("MAILBOX_API_PG_DSN"),
+		emailAddr:           requiredEnv("MAILBOX_EMAIL_SERVICE_ADDR"),
+		mailboxRegisterAddr: requiredEnv("MAILBOX_REGISTER_ADDR"),
 		temporal:            temporal,
 	}
 }
@@ -117,13 +117,11 @@ func envDefault(name string, fallback string) string {
 	return value
 }
 
-func requiredEnvAny(names ...string) string {
-	for _, name := range names {
-		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-			return value
-		}
+func requiredEnv(name string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
 	}
-	log.Fatalf("%s is required", strings.Join(names, " or "))
+	log.Fatalf("%s is required", name)
 	return ""
 }
 

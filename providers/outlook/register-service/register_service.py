@@ -17,7 +17,6 @@ import register_provider
 
 
 DEFAULT_LISTEN_ADDR = ":50051"
-DEFAULT_EMAIL_SERVICE_ADDR = "outlook-imap-service:50051"
 EMAIL_AUTHORIZED = "AUTHORIZED"
 EMAIL_OAUTH_PENDING = "OAUTH_PENDING"
 EMAIL_AUTH_FAILED = "AUTH_FAILED"
@@ -28,6 +27,13 @@ logger = logging.getLogger("outlook-register-service")
 
 def env_str(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def required_env_str(name: str) -> str:
+    value = env_str(name)
+    if not value:
+        raise RuntimeError(f"{name} is required")
+    return value
 
 
 def grpc_listen_addr(value: str) -> str:
@@ -75,7 +81,7 @@ def mailbox_oauth_failure_status(error_message: str) -> str:
 
 class EmailStore:
     def __init__(self) -> None:
-        self.addr = env_str("MAILBOX_EMAIL_SERVICE_ADDR", env_str("EMAIL_ADDR", DEFAULT_EMAIL_SERVICE_ADDR))
+        self.addr = required_env_str("MAILBOX_EMAIL_SERVICE_ADDR")
         self.timeout_seconds = max(env_int("MAILBOX_EMAIL_SERVICE_TIMEOUT_SECONDS", 10), 1)
 
     def _call(self, operation):
