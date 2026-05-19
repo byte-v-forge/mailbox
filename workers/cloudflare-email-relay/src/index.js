@@ -83,6 +83,7 @@ function notifyTelegram(ctx, env, event) {
   });
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(task);
+    return;
   }
 }
 
