@@ -41,13 +41,13 @@ export function MailboxPanel(props: MailboxPanelProps) {
   const toolbarActions = providerToolbarActions(activeView, props, setImportProvider);
 
   return (
-    <Tabs value={activeProvider} onValueChange={(value) => setActiveProvider(value as MailboxProviderTab)} className="min-h-0 flex-1">
+    <Tabs value={activeProvider} onValueChange={(value) => setActiveProvider(value as MailboxProviderTab)} className="min-h-0 flex-1 overflow-hidden">
       <WorkspaceToolbar
         tabs={<ProviderTabs views={providerViews} />}
         actions={<ToolbarActionButtons actions={toolbarActions} />}
       />
       {providerViews.map(({ value, capability, mailboxes, Component }) => (
-        <TabsContent key={value} value={value} className="min-h-0">
+        <TabsContent key={value} value={value} className="mt-0 min-h-0 overflow-auto">
           <Component {...panelProps} mailboxes={mailboxes} capability={capability} />
         </TabsContent>
       ))}

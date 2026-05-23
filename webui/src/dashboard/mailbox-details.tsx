@@ -46,15 +46,15 @@ export function MailboxDetails({ mailbox, showSecrets, inboxResult, inboxLoading
   }, [mailbox.email_address]);
 
   return (
-    <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'overview' | 'inbox')} className="min-h-0 flex-1">
+    <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'overview' | 'inbox')} className="min-h-0 flex-1 overflow-hidden">
       <TabsList variant="line" className="w-full">
         <TabsTrigger value="overview">概览</TabsTrigger>
         <TabsTrigger value="inbox">收件箱 {inboxMessageCount}</TabsTrigger>
       </TabsList>
-      <TabsContent value="overview" className="min-h-0 overflow-auto">
+      <TabsContent value="overview" className="mt-0 min-h-0 overflow-auto">
         <MailboxOverview mailbox={mailbox} showSecrets={showSecrets} latestOtp={latestOtp} onCopy={onCopy} onDelete={onDelete} />
       </TabsContent>
-      <TabsContent value="inbox" className="min-h-0 overflow-auto">
+      <TabsContent value="inbox" className="mt-0 min-h-0 overflow-auto">
         <MailboxInboxSection mailbox={mailbox} result={inboxResult} showSecrets={showSecrets} loading={inboxLoading} canFetch={canFetchInbox} onFetch={onFetchInbox} />
       </TabsContent>
     </Tabs>

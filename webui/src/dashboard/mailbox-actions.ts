@@ -14,14 +14,32 @@ export function useMailboxActions(data: MailboxData, showSecrets: boolean, setSe
   const inboxQuery = useQuery<InboxResult | null>({
     queryKey: selectedInboxKey,
     queryFn: () => api<InboxResult>(`/api/mailboxes/${encodeURIComponent(selectedEmail)}/inbox?limit=20`),
-    enabled: !!selectedEmail,
+    enabled: false,
     initialData: null
   });
   const [oauthing, setOAuthing] = useState('');
   const [inboxLoading, setInboxLoading] = useState(false);
+  const [storedInboxLoading, setStoredInboxLoading] = useState(false);
   const [domainSyncing, setDomainSyncing] = useState(false);
 
   useEffect(() => { if (data.loadError) toast.showError(data.loadError); }, [data.loadError, toast.showError]);
+
+  useEffect(() => {
+    if (!selectedEmail) return;
+    let cancelled = false;
+    setStoredInboxLoading(true);
+    api<InboxResult>(`/api/mailboxes/${encodeURIComponent(selectedEmail)}/inbox?limit=20`)
+      .then((result) => {
+        if (!cancelled) queryClient.setQueryData(selectedInboxKey, result);
+      })
+      .catch((err) => {
+        if (!cancelled) toast.showError(err);
+      })
+      .finally(() => {
+        if (!cancelled) setStoredInboxLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedEmail, selectedInboxKey, queryClient, toast.showError]);
 
   async function runOAuth(emailAddress = '') {
     setOAuthing(emailAddress || '*');
@@ -83,5 +101,5 @@ export function useMailboxActions(data: MailboxData, showSecrets: boolean, setSe
     await data.invalidate();
   }
 
-  return { toast, inboxResult: inboxQuery.data ?? null, inboxQueryKey: selectedInboxKey, oauthing, inboxLoading: inboxQuery.isFetching || inboxLoading, domainSyncing, runOAuth, fetchInbox, syncCloudflareDomains, deleteMailbox, done };
+  return { toast, inboxResult: inboxQuery.data ?? null, inboxQueryKey: selectedInboxKey, oauthing, inboxLoading: storedInboxLoading || inboxQuery.isFetching || inboxLoading, domainSyncing, runOAuth, fetchInbox, syncCloudflareDomains, deleteMailbox, done };
 }

@@ -8,7 +8,7 @@ export function CloudflareMailboxProviderPanel(props: MailboxProviderPanelProps)
     .filter((domain) => mailboxProviderConfig(domain.provider).value === config.value)
     .map((domain) => domain.domain);
   return (
-    <div className="min-h-0 p-3">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
       <MailboxDomainGroups
         {...props}
         providerCapability={props.capability}

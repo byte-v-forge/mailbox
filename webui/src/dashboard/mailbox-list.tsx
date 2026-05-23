@@ -77,7 +77,7 @@ export function MailboxDomainGroups(props: {
     return <div className="p-6 text-center text-sm text-muted-foreground">{props.emptyDomainsText}</div>;
   }
   return (
-    <div className="grid min-h-0 gap-4 overflow-auto">
+    <div className="grid min-h-0 flex-1 content-start gap-4 overflow-auto">
       {allDomains.map((domain) => {
         const domainMailboxes = props.mailboxes.filter((mailbox) => domainForEmail(mailbox.email_address) === domain);
         const configured = configuredDomains.includes(domain);
