@@ -50,7 +50,7 @@ export function tokenText(mailbox: Mailbox) {
   return '缺 Token';
 }
 
-export function mailboxProviderText(provider: string | number) {
+export function mailboxProviderText(provider: string) {
   return mailboxProviderConfig(provider).label;
 }
 
