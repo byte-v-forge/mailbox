@@ -1,26 +1,15 @@
 import type { EmailInboxMessage, EmailMailbox, EmailSignal, FetchMailboxInboxResult } from '@/proto/email';
-import type { FetchMailboxInboxesResponse, MailboxDomain } from '@/proto/mailbox_service';
+import type {
+  FetchMailboxInboxesResponse,
+  MailboxDomain,
+  MailboxProviderActionCapability,
+  MailboxProviderCapabilities
+} from '@/proto/mailbox_service';
 import type { Job, JobSnapshot } from '@/dashboard/modules/workflow/sdk';
 
-export type { EmailSignal, Job, JobSnapshot, MailboxDomain };
+export type { EmailSignal, Job, JobSnapshot, MailboxDomain, MailboxProviderActionCapability };
 
-export type MailboxProviderActionCapability = {
-  action: string | number;
-  required_mailbox_fields?: string[];
-  required_auth_statuses?: string[];
-  bulk_supported?: boolean;
-};
-
-export type MailboxProviderCapability = {
-  provider: string | number;
-  key: string;
-  display_name: string;
-  actions: MailboxProviderActionCapability[];
-  retention_policy?: {
-    scope: string | number;
-    max_messages: number;
-  };
-};
+export type MailboxProviderCapability = MailboxProviderCapabilities;
 
 export type Mailbox = EmailMailbox;
 

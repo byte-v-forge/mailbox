@@ -1,5 +1,6 @@
 import { objectValue, stringValue } from '@/dashboard/module-kit';
 import { stepDetailData } from '@/dashboard/modules/workflow/sdk';
+import { MailboxProviderAction } from '@/proto/mailbox_service';
 import { normalizeUiEmail } from './email-utils';
 import { mailboxProviderConfig, mailboxProviderConfigs, mailboxProviderValue, type MailboxProviderTab } from './mailbox-provider-config';
 import type { Job, Mailbox, MailboxProviderActionCapability, MailboxProviderCapability } from './types';
@@ -20,6 +21,15 @@ export const mailboxActions = {
   autoCreateMailbox: 'auto_create_mailbox',
   syncDomains: 'sync_domains'
 } as const;
+
+const mailboxActionByProto = {
+  [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_IMPORT_MAILBOX]: mailboxActions.importMailbox,
+  [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_RUN_OAUTH]: mailboxActions.runOAuth,
+  [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_FETCH_INBOX]: mailboxActions.fetchInbox,
+  [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_RECEIVE_WEBHOOK]: mailboxActions.receiveWebhook,
+  [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_AUTO_CREATE_MAILBOX]: mailboxActions.autoCreateMailbox,
+  [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_SYNC_DOMAINS]: mailboxActions.syncDomains
+} satisfies Partial<Record<MailboxProviderAction, MailboxActionKey>>;
 
 export function domainForEmail(email: string) {
   const [, domain = ''] = normalizeUiEmail(email).split('@');
@@ -101,8 +111,7 @@ export function parseMailboxBatch(value: string, provider: string) {
 export function capabilityForProvider(capabilities: MailboxProviderCapability[], provider: string) {
   const target = mailboxProviderValue(provider);
   return capabilities.find((capability) => (
-    mailboxProviderValue(capability.key || String(capability.provider || '')) === target ||
-    providerNumberKey(capability.provider) === target
+    mailboxProviderValue(capability.key || String(capability.provider || '')) === target
   ));
 }
 
@@ -126,25 +135,8 @@ export function canRunProviderMailboxAction(capabilities: MailboxProviderCapabil
   return canRunMailboxAction(mailbox, providerAction(capabilityForProvider(capabilities, mailbox.provider), action));
 }
 
-export function actionKey(action: string | number): MailboxActionKey | '' {
-  if (typeof action === 'number') {
-    return {
-      1: mailboxActions.importMailbox,
-      2: mailboxActions.runOAuth,
-      3: mailboxActions.fetchInbox,
-      4: mailboxActions.receiveWebhook,
-      5: mailboxActions.autoCreateMailbox,
-      6: mailboxActions.syncDomains
-    }[action] || '';
-  }
-  const value = String(action || '').toLowerCase();
-  if (value.includes('import_mailbox')) return mailboxActions.importMailbox;
-  if (value.includes('run_oauth')) return mailboxActions.runOAuth;
-  if (value.includes('fetch_inbox')) return mailboxActions.fetchInbox;
-  if (value.includes('receive_webhook')) return mailboxActions.receiveWebhook;
-  if (value.includes('auto_create_mailbox')) return mailboxActions.autoCreateMailbox;
-  if (value.includes('sync_domains')) return mailboxActions.syncDomains;
-  return '';
+export function actionKey(action: MailboxProviderAction): MailboxActionKey | '' {
+  return mailboxActionByProto[action] || '';
 }
 
 function requiredFieldsPresent(mailbox: Mailbox, fields: string[]) {
@@ -154,9 +146,4 @@ function requiredFieldsPresent(mailbox: Mailbox, fields: string[]) {
     access_token: mailbox.access_token
   };
   return fields.every((field) => !!String(values[field] || '').trim());
-}
-
-function providerNumberKey(provider: string | number) {
-  const numeric = Number(provider);
-  return mailboxProviderConfigs.find((item) => item.enumNumber === numeric)?.value || '';
 }
