@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"mailboxapi/pb"
 )
@@ -46,19 +47,19 @@ func normalizeOutboundWebhooks(items []*pb.OutboundEmailWebhook) []*pb.OutboundE
 		if item == nil {
 			continue
 		}
-		hook := *item
+		hook := proto.Clone(item).(*pb.OutboundEmailWebhook)
 		hook.Url = strings.TrimSpace(item.GetUrl())
 		if hook.GetUrl() == "" {
 			continue
 		}
-		if strings.TrimSpace(hook.GetTokenEnv()) != "" && outboundWebhookToken(&hook) == "" {
+		if strings.TrimSpace(hook.GetTokenEnv()) != "" && outboundWebhookToken(hook) == "" {
 			logWarning("skip outbound mailbox webhook %s: token env is empty", hook.GetName())
 			continue
 		}
 		if hook.GetPreviewLimit() <= 0 {
 			hook.PreviewLimit = 500
 		}
-		hooks = append(hooks, &hook)
+		hooks = append(hooks, hook)
 	}
 	return hooks
 }
@@ -169,10 +170,7 @@ func cloneEmailInboxMessage(message *pb.EmailInboxMessage) *pb.EmailInboxMessage
 	if message == nil {
 		return nil
 	}
-	clone := *message
-	clone.Recipients = append([]string{}, message.GetRecipients()...)
-	clone.Signals = append([]*pb.EmailSignal{}, message.GetSignals()...)
-	return &clone
+	return proto.Clone(message).(*pb.EmailInboxMessage)
 }
 
 func matchesProviderFilter(filters []pb.MailboxProvider, provider string) bool {
