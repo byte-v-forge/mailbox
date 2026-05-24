@@ -10,8 +10,8 @@ import (
 	"mailboxapi/pb"
 )
 
-func cloudflareMailboxProvider() *mailboxProviderDefinition {
-	return &mailboxProviderDefinition{
+func cloudflareMailboxProvider() *mailboxProviderPlugin {
+	return &mailboxProviderPlugin{
 		key:             emailProviderCloudflare,
 		aliases:         []string{"cf", "cloudflare-email-relay"},
 		provider:        pb.MailboxProvider_MAILBOX_PROVIDER_CLOUDFLARE,

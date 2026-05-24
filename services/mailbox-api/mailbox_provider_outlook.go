@@ -12,8 +12,8 @@ import (
 	"mailboxapi/pb"
 )
 
-func outlookMailboxProvider() *mailboxProviderDefinition {
-	return &mailboxProviderDefinition{
+func outlookMailboxProvider() *mailboxProviderPlugin {
+	return &mailboxProviderPlugin{
 		key:         emailProviderOutlook,
 		aliases:     []string{"microsoft", "graph"},
 		provider:    pb.MailboxProvider_MAILBOX_PROVIDER_OUTLOOK,
