@@ -61,8 +61,8 @@ func loadCloudflareEmailConfig() *pb.CloudflareEmailConfig {
 }
 
 func fetchCloudflareEmailDomains(ctx context.Context, client *http.Client, token string, cfg *pb.CloudflareEmailConfig) ([]string, error) {
-	if cfg == nil || len(cfg.GetZones()) == 0 {
-		return nil, nil
+	if cfg == nil {
+		cfg = &pb.CloudflareEmailConfig{}
 	}
 	api := &cloudflareEmailAPI{
 		client:  client,
@@ -74,7 +74,11 @@ func fetchCloudflareEmailDomains(ctx context.Context, client *http.Client, token
 	}
 	out := []string{}
 	seen := map[string]struct{}{}
-	for _, zone := range cfg.GetZones() {
+	zones, err := api.cloudflareEmailZones(ctx, cfg.GetZones())
+	if err != nil {
+		return nil, err
+	}
+	for _, zone := range zones {
 		if !optionalBoolEnabled(zone.Enabled) {
 			continue
 		}
@@ -83,11 +87,13 @@ func fetchCloudflareEmailDomains(ctx context.Context, client *http.Client, token
 		}
 		zoneID, zoneName, err := api.resolveZone(ctx, zone)
 		if err != nil {
-			return nil, err
+			logWarning("skip Cloudflare email zone %s: %v", cloudflareZoneLabel(zone), err)
+			continue
 		}
 		catchAll, err := api.emailRoutingCatchAll(ctx, zoneID)
 		if err != nil {
-			return nil, err
+			logWarning("skip Cloudflare email zone %s catch-all: %v", firstNonEmpty(zoneName, cloudflareZoneLabel(zone)), err)
+			continue
 		}
 		workerName := strings.TrimSpace(zone.GetWorkerName())
 		if !catchAll.WorkerEnabled(workerName) {
@@ -95,7 +101,8 @@ func fetchCloudflareEmailDomains(ctx context.Context, client *http.Client, token
 		}
 		mxDomains, err := api.emailRoutingMXDomains(ctx, zoneID)
 		if err != nil {
-			return nil, err
+			logWarning("skip Cloudflare email zone %s MX: %v", firstNonEmpty(zoneName, cloudflareZoneLabel(zone)), err)
+			continue
 		}
 		added := false
 		for _, domain := range mxDomains {
@@ -187,6 +194,61 @@ func (api *cloudflareEmailAPI) resolveZone(ctx context.Context, zone *pb.Cloudfl
 	return zones[0].ID, zones[0].Name, nil
 }
 
+func (api *cloudflareEmailAPI) cloudflareEmailZones(ctx context.Context, configured []*pb.CloudflareEmailZone) ([]*pb.CloudflareEmailZone, error) {
+	out := []*pb.CloudflareEmailZone{}
+	seen := map[string]struct{}{}
+	add := func(zone *pb.CloudflareEmailZone) {
+		if zone == nil {
+			return
+		}
+		key := firstNonEmpty(strings.TrimSpace(zone.GetZoneId()), normalizeCloudflareDomain(zone.GetZoneName()))
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, zone)
+	}
+	for _, zone := range configured {
+		add(zone)
+	}
+
+	page := 1
+	for {
+		values := url.Values{}
+		values.Set("page", fmt.Sprintf("%d", page))
+		values.Set("per_page", "50")
+		zones, info, err := requestCloudflarePage[[]cloudflareZone](ctx, api, "/zones?"+values.Encode())
+		if err != nil {
+			if len(out) > 0 {
+				logWarning("skip dynamic Cloudflare zone discovery: %v", err)
+				return out, nil
+			}
+			return nil, err
+		}
+		for _, zone := range zones {
+			name := normalizeCloudflareDomain(zone.Name)
+			if zone.ID == "" || name == "" {
+				continue
+			}
+			add(&pb.CloudflareEmailZone{
+				ZoneId:          zone.ID,
+				ZoneName:        name,
+				WorkerName:      "",
+				Enabled:         nil,
+				CatchAllEnabled: nil,
+			})
+		}
+		if info == nil || info.TotalPages <= page {
+			break
+		}
+		page++
+	}
+	return out, nil
+}
+
 func (api *cloudflareEmailAPI) emailRoutingCatchAll(ctx context.Context, zoneID string) (cloudflareEmailCatchAll, error) {
 	return requestCloudflare[cloudflareEmailCatchAll](ctx, api, "/zones/"+url.PathEscape(zoneID)+"/email/routing/rules/catch_all")
 }
@@ -211,26 +273,31 @@ func (api *cloudflareEmailAPI) emailRoutingMXDomains(ctx context.Context, zoneID
 }
 
 func requestCloudflare[T any](ctx context.Context, api *cloudflareEmailAPI, path string) (T, error) {
+	result, _, err := requestCloudflarePage[T](ctx, api, path)
+	return result, err
+}
+
+func requestCloudflarePage[T any](ctx context.Context, api *cloudflareEmailAPI, path string) (T, *cloudflarePageInfo, error) {
 	var zero T
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api.baseURL+path, nil)
 	if err != nil {
-		return zero, err
+		return zero, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+api.token)
 	req.Header.Set("Accept", "application/json")
 	resp, err := api.client.Do(req)
 	if err != nil {
-		return zero, err
+		return zero, nil, err
 	}
 	defer resp.Body.Close()
 	var decoded cloudflareResponse[T]
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return zero, err
+		return zero, nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !decoded.Success {
-		return zero, fmt.Errorf("Cloudflare API %s failed status=%d errors=%s", path, resp.StatusCode, cloudflareErrorsString(decoded.Errors))
+		return zero, decoded.Info, fmt.Errorf("Cloudflare API %s failed status=%d errors=%s", path, resp.StatusCode, cloudflareErrorsString(decoded.Errors))
 	}
-	return decoded.Result, nil
+	return decoded.Result, decoded.Info, nil
 }
 
 func (rule cloudflareEmailCatchAll) WorkerEnabled(workerName string) bool {
@@ -272,6 +339,13 @@ func appendCloudflareEmailDomain(out *[]string, seen map[string]struct{}, value 
 
 func normalizeCloudflareDomain(value string) string {
 	return strings.Trim(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+
+func cloudflareZoneLabel(zone *pb.CloudflareEmailZone) string {
+	if zone == nil {
+		return "unknown"
+	}
+	return firstNonEmpty(normalizeCloudflareDomain(zone.GetZoneName()), strings.TrimSpace(zone.GetZoneId()), "unknown")
 }
 
 func cloudflareErrorsString(errors []cloudflareError) string {
