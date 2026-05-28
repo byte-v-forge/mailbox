@@ -14,10 +14,10 @@ import {
   SheetTitle,
   SegmentedControl,
   useForm
-} from '@/dashboard/module-kit';
-import type { ActionButtonDescriptor, Control, ControlledInputFieldDescriptor } from '@/dashboard/module-kit';
+} from '@byte-v-forge/common-ui';
+import type { ActionButtonDescriptor, Control, ControlledInputFieldDescriptor } from '@byte-v-forge/common-ui';
 import { mailboxProviderConfig, parseMailboxBatch, type MailboxProviderTab } from './mailbox-utils';
-import type { Mailbox } from './types';
+import type { UpsertEmailMailboxRequest, UpsertEmailMailboxResponse } from '../proto/email';
 
 type FormState = {
   email: string;
@@ -63,23 +63,30 @@ export function MailboxImportSheet({ open, provider, busy, onOpenChange, onDone,
     disabled: busy || working || (mode === 'single' ? !singleEmail.trim() : !batchText.trim()),
   }];
 
-  function payload(email: string, password: string, values = singleForm.getValues()) {
+  function payload(email: string, password: string, values = singleForm.getValues()): UpsertEmailMailboxRequest {
     return {
-      email,
-      provider,
-      password: credentialFields.includes('password') ? password : '',
-      refresh_token: credentialFields.includes('refresh_token') ? values.refresh_token : '',
-      access_token: credentialFields.includes('access_token') ? values.access_token : '',
-      auth_status: ''
+      mailbox: {
+        email_address: email,
+        password: credentialFields.includes('password') ? password : '',
+        refresh_token: credentialFields.includes('refresh_token') ? values.refresh_token : '',
+        access_token: credentialFields.includes('access_token') ? values.access_token : '',
+        provider_key: provider,
+        auth_status: '',
+        last_error: '',
+        created_at: 0,
+        updated_at: 0,
+        latest_signal: undefined,
+        domain: ''
+      }
     };
   }
 
   async function saveSingle(values: FormState) {
     setWorking(true);
     try {
-      const resp = await api<Mailbox>('/api/mailboxes', { method: 'POST', body: JSON.stringify(payload(values.email, values.password, values)) });
+      const resp = await api<UpsertEmailMailboxResponse>('/api/mailbox/mailboxes', { method: 'POST', body: JSON.stringify(payload(values.email, values.password, values)) });
       singleForm.reset({ email: '', password: '', refresh_token: '', access_token: '' });
-      onDone(`邮箱已入池: ${resp.email_address}`);
+      onDone(`邮箱已入池: ${resp.mailbox?.email_address || values.email}`);
     } catch (err) {
       onError(errorText(err));
     } finally {
@@ -99,7 +106,7 @@ export function MailboxImportSheet({ open, provider, busy, onOpenChange, onDone,
     try {
       for (const item of batch.items) {
         try {
-          await api<Mailbox>('/api/mailboxes', { method: 'POST', body: JSON.stringify(payload(item.email, item.password)) });
+          await api<UpsertEmailMailboxResponse>('/api/mailbox/mailboxes', { method: 'POST', body: JSON.stringify(payload(item.email, item.password)) });
           success += 1;
         } catch (err) {
           failures.push(`${item.email}: ${errorText(err)}`);

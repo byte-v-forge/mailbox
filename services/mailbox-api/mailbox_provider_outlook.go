@@ -6,6 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/byte-v-forge/common-lib/emailx"
+	"github.com/byte-v-forge/common-lib/envx"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -16,7 +19,6 @@ func outlookMailboxProvider() *mailboxProviderPlugin {
 	return &mailboxProviderPlugin{
 		key:         emailProviderOutlook,
 		aliases:     []string{"microsoft", "graph"},
-		provider:    pb.MailboxProvider_MAILBOX_PROVIDER_OUTLOOK,
 		displayName: "Outlook",
 		schemaStatements: func() []string {
 			return []string{
@@ -98,32 +100,35 @@ func outlookMailboxProvider() *mailboxProviderPlugin {
 	}
 }
 
-func outlookProviderCapabilities() *pb.MailboxProviderCapabilities {
-	return &pb.MailboxProviderCapabilities{
-		Provider:    pb.MailboxProvider_MAILBOX_PROVIDER_OUTLOOK,
+func outlookProviderCapabilities() *mailboxv1.MailboxProviderCapabilities {
+	return &mailboxv1.MailboxProviderCapabilities{
 		Key:         emailProviderOutlook,
 		DisplayName: "Outlook",
-		Actions: []*pb.MailboxProviderActionCapability{
+		Actions: []*mailboxv1.MailboxProviderActionCapability{
 			{
-				Action:        pb.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_IMPORT_MAILBOX,
+				Action:        mailboxv1.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_IMPORT_MAILBOX,
 				BulkSupported: true,
 			},
 			{
-				Action:                pb.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_RUN_OAUTH,
-				RequiredMailboxFields: []string{"password"},
-				RequiredAuthStatuses:  []string{authStatusOAuthPending, authStatusAuthFailed, authStatusNeedsManualVerify},
-				BulkSupported:         true,
+				Action: mailboxv1.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_RUN_OAUTH,
+				RequiredCredentials: []mailboxv1.MailboxCredentialKind{
+					mailboxv1.MailboxCredentialKind_MAILBOX_CREDENTIAL_KIND_PASSWORD,
+				},
+				RequiredAuthStatuses: []string{authStatusOAuthPending, authStatusAuthFailed, authStatusNeedsManualVerify},
+				BulkSupported:        true,
 			},
 			{
-				Action:                pb.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_FETCH_INBOX,
-				RequiredAuthStatuses:  []string{authStatusAuthorized},
-				RequiredMailboxFields: []string{"refresh_token"},
-				BulkSupported:         true,
+				Action: mailboxv1.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_FETCH_INBOX,
+				RequiredCredentials: []mailboxv1.MailboxCredentialKind{
+					mailboxv1.MailboxCredentialKind_MAILBOX_CREDENTIAL_KIND_OAUTH_REFRESH_TOKEN,
+				},
+				RequiredAuthStatuses: []string{authStatusAuthorized},
+				BulkSupported:        true,
 			},
 		},
-		RetentionPolicy: &pb.MailboxMessageRetentionPolicy{
-			Scope:       pb.MailboxMessageRetentionScope_MAILBOX_MESSAGE_RETENTION_SCOPE_MAILBOX,
-			MaxMessages: int32(envInt("MAILBOX_OUTLOOK_MAX_MESSAGES_PER_MAILBOX", defaultOutlookMaxMessages)),
+		RetentionPolicy: &mailboxv1.MailboxMessageRetentionPolicy{
+			Scope:       mailboxv1.MailboxMessageRetentionScope_MAILBOX_MESSAGE_RETENTION_SCOPE_MAILBOX,
+			MaxMessages: int32(envx.Int("MAILBOX_OUTLOOK_MAX_MESSAGES_PER_MAILBOX", defaultOutlookMaxMessages)),
 		},
 	}
 }
@@ -152,7 +157,7 @@ func upsertOutlookMailboxData(ctx context.Context, tx pgx.Tx, mailbox *pb.EmailM
 			END,
 			last_error = CASE WHEN $8 <> '' OR EXCLUDED.last_error <> '' THEN EXCLUDED.last_error ELSE mailbox_outlook_accounts.last_error END,
 			updated_at = EXCLUDED.updated_at
-	`, normalizeEmail(mailbox.GetEmailAddress()), strings.TrimSpace(mailbox.GetPassword()),
+	`, emailx.Normalize(mailbox.GetEmailAddress()), strings.TrimSpace(mailbox.GetPassword()),
 		strings.TrimSpace(mailbox.GetRefreshToken()), strings.TrimSpace(mailbox.GetAccessToken()),
 		authStatus, strings.TrimSpace(mailbox.GetLastError()), now, strings.TrimSpace(mailbox.GetAuthStatus()))
 	return err
@@ -160,10 +165,10 @@ func upsertOutlookMailboxData(ctx context.Context, tx pgx.Tx, mailbox *pb.EmailM
 
 func validateOutlookPollableMailbox(row *mailboxRow) error {
 	if strings.TrimSpace(row.RefreshToken) == "" {
-		return fmt.Errorf("mailbox has no refresh token: %s", redactEmail(row.Email))
+		return fmt.Errorf("mailbox has no refresh token: %s", emailx.Redact(row.Email))
 	}
 	if row.AuthStatus != authStatusAuthorized {
-		return fmt.Errorf("mailbox is not authorized: %s auth_status=%s", redactEmail(row.Email), row.AuthStatus)
+		return fmt.Errorf("mailbox is not authorized: %s auth_status=%s", emailx.Redact(row.Email), row.AuthStatus)
 	}
 	return nil
 }
@@ -173,7 +178,7 @@ func updateOutlookAuthStatus(ctx context.Context, tx pgx.Tx, email string, authS
 		UPDATE mailbox_outlook_accounts
 		SET auth_status = $1, last_error = $2, updated_at = $3
 		WHERE mailbox_email = $4
-	`, strings.TrimSpace(authStatus), strings.TrimSpace(lastError), now, normalizeEmail(email))
+	`, strings.TrimSpace(authStatus), strings.TrimSpace(lastError), now, emailx.Normalize(email))
 	return err
 }
 
@@ -182,6 +187,6 @@ func updateOutlookTokens(ctx context.Context, pool *pgxpool.Pool, email string, 
 		UPDATE mailbox_outlook_accounts
 		SET refresh_token = $1, access_token = $2, auth_status = $3, last_error = '', updated_at = $4
 		WHERE mailbox_email = $5
-	`, strings.TrimSpace(refreshToken), strings.TrimSpace(accessToken), authStatusAuthorized, time.Now().Unix(), normalizeEmail(email))
+	`, strings.TrimSpace(refreshToken), strings.TrimSpace(accessToken), authStatusAuthorized, time.Now().Unix(), emailx.Normalize(email))
 	return err
 }

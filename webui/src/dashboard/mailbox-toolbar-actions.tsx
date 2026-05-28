@@ -1,5 +1,5 @@
 import { Eye, EyeOff, Inbox, KeyRound, Plus, RefreshCcw } from 'lucide-react';
-import type { ToolbarActionDescriptor } from '@/dashboard/module-kit';
+import type { ToolbarActionDescriptor } from '@byte-v-forge/common-ui';
 import { actionKey, bulkMailboxActionCount, mailboxActions, type MailboxActionKey, type MailboxProviderTab } from './mailbox-utils';
 import type { Mailbox, MailboxProviderActionCapability, MailboxProviderCapability } from './types';
 
@@ -17,7 +17,7 @@ type ProviderToolbarProps = {
   domainSyncing: boolean;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onFetchInbox: () => Promise<void>;
-  onSyncDomains: () => Promise<void>;
+  onSyncDomains: (providerKey: string) => Promise<void>;
   onToggleSecrets: () => void;
 };
 
@@ -55,12 +55,12 @@ const toolbarActionFactories: Partial<Record<MailboxActionKey, ToolbarActionFact
       onClick: () => void props.onFetchInbox(),
     };
   },
-  [mailboxActions.syncDomains]: ({ props }) => ({
+  [mailboxActions.syncDomains]: ({ view, props }) => ({
     id: 'sync-domains',
     label: props.domainSyncing ? '同步中' : '同步域名',
     icon: <RefreshCcw className="size-4" />,
-    disabled: props.busy || props.domainSyncing,
-    onClick: () => void props.onSyncDomains(),
+    disabled: props.busy || props.domainSyncing || !view.capability?.key,
+    onClick: () => void props.onSyncDomains(view.capability?.key || ''),
   }),
 };
 

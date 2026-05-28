@@ -1,4 +1,4 @@
-import type { Job, Mailbox, MailboxDomain, MailboxProviderCapability } from './types';
+import type { Mailbox, MailboxDomain, MailboxOperation, MailboxProviderCapability } from './types';
 
 export type MailboxProviderPanelProps = {
   mailboxes: Mailbox[];
@@ -10,12 +10,11 @@ export type MailboxProviderPanelProps = {
   oauthing: string;
   inboxLoading: boolean;
   domainSyncing: boolean;
-  runningWorkflowByEmail: Map<string, Job>;
+  runningOperationByEmail: Map<string, MailboxOperation>;
   onSelect: (mailbox: Mailbox) => void;
-  onOpenWorkflow: (job: Job) => void;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onFetchInbox: () => Promise<void>;
-  onSyncDomains: () => Promise<void>;
+  onSyncDomains: (providerKey: string) => Promise<void>;
   onToggleSecrets: () => void;
   onDelete: (mailbox: Mailbox) => Promise<void>;
   onDone: (message: string) => void;

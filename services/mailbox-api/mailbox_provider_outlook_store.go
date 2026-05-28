@@ -5,18 +5,21 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/byte-v-forge/common-lib/emailx"
+	"github.com/byte-v-forge/common-lib/envx"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
+	"github.com/byte-v-forge/common-lib/timex"
 
-	"mailboxapi/pb"
+	"github.com/jackc/pgx/v5"
 )
 
-func (s *MailboxStore) RecordInboxMessages(ctx context.Context, email string, messages []graphMessage) ([]*pb.EmailInboxMessage, error) {
-	email = normalizeEmail(email)
+func (s *MailboxStore) RecordInboxMessages(ctx context.Context, email string, messages []graphMessage) ([]*mailboxv1.EmailInboxMessage, error) {
+	email = emailx.Normalize(email)
 	if email == "" {
 		return nil, errors.New("email_address is required")
 	}
 	if len(messages) == 0 {
-		return []*pb.EmailInboxMessage{}, nil
+		return []*mailboxv1.EmailInboxMessage{}, nil
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -26,19 +29,19 @@ func (s *MailboxStore) RecordInboxMessages(ctx context.Context, email string, me
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	now := time.Now().Unix()
-	unseen := make([]*pb.EmailInboxMessage, 0, len(messages))
+	unseen := make([]*mailboxv1.EmailInboxMessage, 0, len(messages))
 	var maxReceivedAtNs int64
 	touchedMailboxes := map[string]struct{}{}
 	for _, msg := range messages {
-		receivedAtNs := parseGraphTimeUnixNano(msg.ReceivedDateTime)
+		receivedAtNs := timex.UnixNano(msg.ReceivedDateTime)
 		if receivedAtNs > maxReceivedAtNs {
 			maxReceivedAtNs = receivedAtNs
 		}
 		inboxMsg := inboxMessage(email, msg)
 		key := stableMessageKey(emailProviderOutlook, email, messageKey(msg))
-		persistedMessages := []*pb.EmailInboxMessage{}
+		persistedMessages := []*mailboxv1.EmailInboxMessage{}
 		for _, mailboxEmail := range messageMailboxEmails(email, inboxMsg.GetRecipients()) {
-			persisted := &pb.EmailInboxMessage{
+			persisted := &mailboxv1.EmailInboxMessage{
 				Id:                 inboxMsg.GetId(),
 				MailboxEmail:       mailboxEmail,
 				Subject:            inboxMsg.GetSubject(),
@@ -46,7 +49,7 @@ func (s *MailboxStore) RecordInboxMessages(ctx context.Context, email string, me
 				BodyPreview:        inboxMsg.GetBodyPreview(),
 				ReceivedAtUnix:     inboxMsg.GetReceivedAtUnix(),
 				Recipients:         inboxMsg.GetRecipients(),
-				Provider:           emailProviderOutlook,
+				ProviderKey:        emailProviderOutlook,
 				SourceMailboxEmail: email,
 				BodyText:           inboxMsg.GetBodyText(),
 				HtmlBody:           inboxMsg.GetHtmlBody(),
@@ -95,12 +98,16 @@ func (s *MailboxStore) RecordInboxMessages(ctx context.Context, email string, me
 		}
 	}
 	for mailboxEmail := range touchedMailboxes {
-		if err := pruneMailboxMessages(ctx, tx, emailProviderOutlook, mailboxEmail, envInt("MAILBOX_OUTLOOK_MAX_MESSAGES_PER_MAILBOX", defaultOutlookMaxMessages)); err != nil {
+		if err := pruneMailboxMessages(ctx, tx, emailProviderOutlook, mailboxEmail, envx.Int("MAILBOX_OUTLOOK_MAX_MESSAGES_PER_MAILBOX", defaultOutlookMaxMessages)); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.enqueueInboxOutboxEvents(ctx, tx, unseen); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	s.recordRecentInboxMessages(ctx, unseen)
 	return unseen, nil
 }

@@ -1,13 +1,17 @@
-import type { EmailInboxMessage, EmailMailbox, EmailSignal, FetchMailboxInboxResult } from '@/proto/email';
+import type { EmailMailbox } from '../proto/email';
 import type {
+  EmailMailbox as InboxMailbox,
+  EmailInboxMessage,
+  EmailSignal,
+  FetchMailboxInboxResult,
   FetchMailboxInboxesResponse,
   MailboxDomain,
+  MailboxOperation,
   MailboxProviderActionCapability,
   MailboxProviderCapabilities
-} from '@/proto/mailbox_service';
-import type { Job, JobSnapshot } from '@/dashboard/modules/workflow/sdk';
+} from '@byte-v-forge/common-ui';
 
-export type { EmailSignal, Job, JobSnapshot, MailboxDomain, MailboxProviderActionCapability };
+export type { EmailSignal, InboxMailbox, MailboxDomain, MailboxOperation, MailboxProviderActionCapability };
 
 export type MailboxProviderCapability = MailboxProviderCapabilities;
 
@@ -18,7 +22,7 @@ export type InboxMessage = EmailInboxMessage & {
 };
 
 export type InboxResult = Omit<FetchMailboxInboxResult, 'mailbox' | 'messages'> & {
-  mailbox?: Mailbox;
+  mailbox?: InboxMailbox;
   messages?: InboxMessage[];
 };
 

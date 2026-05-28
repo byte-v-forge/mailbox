@@ -1,5 +1,5 @@
 import { Copy } from 'lucide-react';
-import { Button, buttonHint, formatUnix, mask, maskPreview } from '@/dashboard/module-kit';
+import { Button, Card, buttonHint, formatUnix, mask, maskPreview } from '@byte-v-forge/common-ui';
 import type { LatestOtp } from './types';
 
 export function MailboxOtpPanel({ latestOtp, showSecrets, loading, compact, onCopy }: {
@@ -16,7 +16,7 @@ export function MailboxOtpPanel({ latestOtp, showSecrets, loading, compact, onCo
   const sizeClass = compact ? 'min-h-[52px] p-2' : 'min-h-[68px] p-2';
   const codeClass = compact ? 'text-base' : 'text-xl';
   return (
-    <div className={`grid grid-cols-[minmax(0,1fr)_34px] items-center gap-2 rounded-lg border ${sizeClass} ${hasOtp ? 'border-emerald-200 bg-emerald-50' : 'bg-muted/30'}`} role="status" aria-live="polite">
+    <Card className={`grid grid-cols-[minmax(0,1fr)_34px] items-center gap-2 shadow-none ${sizeClass} ${hasOtp ? 'border-emerald-200 bg-emerald-50' : 'bg-muted/30'}`} role="status" aria-live="polite">
       <div className="grid min-w-0 gap-1">
         <span className="text-xs font-semibold text-muted-foreground">{loading ? '正在拉取 OTP' : '最近 OTP'}</span>
         <strong className={`truncate leading-tight ${codeClass} ${hasOtp ? 'font-mono text-emerald-700' : ''}`}>
@@ -29,6 +29,6 @@ export function MailboxOtpPanel({ latestOtp, showSecrets, loading, compact, onCo
       <Button className="copyButton" {...buttonHint('复制 OTP')} disabled={!hasOtp} onClick={() => onCopy('OTP', code)}>
         <Copy size={14} />
       </Button>
-    </div>
+    </Card>
   );
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/byte-v-forge/common-lib/emailx"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
+	"github.com/byte-v-forge/common-lib/redisx"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -14,27 +16,34 @@ import (
 )
 
 type EmailService struct {
-	pb.UnimplementedEmailServiceServer
 	store     *MailboxStore
 	watcher   *MailWatcher
 	providers mailboxProviderRuntimeConfig
-	inboxOnce sync.Once
-	inboxGate chan struct{}
+	inboxLock *redisx.BestEffortLocker
+	work      *mailboxWorkDispatcher
 }
 
 func (s *EmailService) acquireInboxLock(ctx context.Context) (func(), error) {
-	s.inboxOnce.Do(func() {
-		s.inboxGate = make(chan struct{}, 1)
-	})
-	select {
-	case s.inboxGate <- struct{}{}:
-		return func() { <-s.inboxGate }, nil
-	case <-ctx.Done():
+	if s.inboxLock == nil {
+		return nil, status.Error(codes.Unavailable, "mailbox inbox lock is not configured")
+	}
+	lock, err := s.inboxLock.Lock(ctx, "fetch-inboxes")
+	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, status.Error(codes.DeadlineExceeded, "inbox fetch wait timeout")
 		}
-		return nil, status.Error(codes.Canceled, "request cancelled")
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, status.Error(codes.Canceled, "request cancelled")
+		}
+		return nil, status.Error(codes.Unavailable, err.Error())
 	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := lock.Unlock(unlockCtx); err != nil {
+			logWarning("release mailbox inbox lock failed: %v", err)
+		}
+	}, nil
 }
 
 func (s *EmailService) MarkEmailAuthStatus(ctx context.Context, request *pb.MarkEmailAuthStatusRequest) (*pb.MarkEmailAuthStatusResponse, error) {
@@ -54,7 +63,7 @@ func (s *EmailService) UpsertMailbox(ctx context.Context, request *pb.UpsertEmai
 }
 
 func (s *EmailService) ListMailboxes(ctx context.Context, request *pb.ListEmailMailboxesRequest) (*pb.ListEmailMailboxesResponse, error) {
-	mailboxes, err := s.store.ListMailboxes(ctx, request.GetAuthStatus(), request.GetProvider(), request.GetLimit())
+	mailboxes, err := s.store.ListMailboxes(ctx, request.GetAuthStatus(), request.GetProviderKey(), request.GetLimit())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -69,7 +78,7 @@ func (s *EmailService) DeleteMailbox(ctx context.Context, request *pb.DeleteMail
 	return &pb.DeleteMailboxResponse{Deleted: deleted}, nil
 }
 
-func (s *EmailService) FetchInboxes(ctx context.Context, request *pb.FetchInboxesRequest) (*pb.FetchInboxesResponse, error) {
+func (s *EmailService) FetchInboxes(ctx context.Context, request *mailboxv1.FetchMailboxInboxesRequest) (*mailboxv1.FetchMailboxInboxesResponse, error) {
 	unlock, err := s.acquireInboxLock(ctx)
 	if err != nil {
 		return nil, err
@@ -81,7 +90,7 @@ func (s *EmailService) FetchInboxes(ctx context.Context, request *pb.FetchInboxe
 		resultMailbox *pb.EmailMailbox
 	}
 	targets := []inboxTarget{}
-	requestedEmail := normalizeEmail(request.GetEmailAddress())
+	requestedEmail := emailx.Normalize(request.GetEmailAddress())
 	if requestedEmail != "" {
 		if resultMailbox, ok := s.providers.StoredInboxOnlyMailbox(requestedEmail); ok {
 			if mailbox, err := s.store.FindMailbox(ctx, requestedEmail); err == nil {
@@ -91,12 +100,12 @@ func (s *EmailService) FetchInboxes(ctx context.Context, request *pb.FetchInboxe
 			if err != nil {
 				return nil, status.Error(codes.Internal, err.Error())
 			}
-			return &pb.FetchInboxesResponse{
+			return &mailboxv1.FetchMailboxInboxesResponse{
 				MailboxCount: int32(1),
 				FetchedCount: int32(1),
 				MessageCount: int32(len(messages)),
-				Results: []*pb.FetchMailboxInboxResult{{
-					Mailbox:  resultMailbox,
+				Results: []*mailboxv1.FetchMailboxInboxResult{{
+					Mailbox:  publicMailbox(resultMailbox),
 					Messages: messages,
 				}},
 			}, nil
@@ -120,9 +129,9 @@ func (s *EmailService) FetchInboxes(ctx context.Context, request *pb.FetchInboxe
 		}
 	}
 
-	resp := &pb.FetchInboxesResponse{
+	resp := &mailboxv1.FetchMailboxInboxesResponse{
 		MailboxCount: int32(len(targets)),
-		Results:      []*pb.FetchMailboxInboxResult{},
+		Results:      []*mailboxv1.FetchMailboxInboxResult{},
 	}
 	for _, target := range targets {
 		select {
@@ -131,7 +140,7 @@ func (s *EmailService) FetchInboxes(ctx context.Context, request *pb.FetchInboxe
 		default:
 		}
 
-		result := &pb.FetchMailboxInboxResult{Mailbox: target.resultMailbox}
+		result := &mailboxv1.FetchMailboxInboxResult{Mailbox: publicMailbox(target.resultMailbox)}
 		messages, err := s.watcher.FetchMailboxInbox(ctx, target.fetchMailbox, request.GetLimitPerMailbox(), request.GetReceivedAfterUnix())
 		if err != nil {
 			result.ErrorMessage = err.Error()
@@ -150,8 +159,8 @@ func (s *EmailService) FetchInboxes(ctx context.Context, request *pb.FetchInboxe
 	return resp, nil
 }
 
-func (s *EmailService) ListInbox(ctx context.Context, request *pb.ListMailboxInboxRequest) (*pb.ListMailboxInboxResponse, error) {
-	email := normalizeEmail(request.GetEmailAddress())
+func (s *EmailService) ListInbox(ctx context.Context, request *mailboxv1.ListMailboxInboxRequest) (*mailboxv1.ListMailboxInboxResponse, error) {
+	email := emailx.Normalize(request.GetEmailAddress())
 	if email == "" {
 		return nil, status.Error(codes.InvalidArgument, "email_address is required")
 	}
@@ -168,78 +177,52 @@ func (s *EmailService) ListInbox(ctx context.Context, request *pb.ListMailboxInb
 	}
 	resultMailbox := &pb.EmailMailbox{
 		EmailAddress: email,
-		Provider:     s.providers.ProviderForInboxAddress(email, messages),
+		ProviderKey:  s.providers.ProviderForInboxAddress(email, messages),
 		Domain:       domainForEmail(email),
 	}
 	prepareMailboxProjection(resultMailbox)
 	if mailbox, err := s.store.FindMailbox(ctx, email); err == nil {
 		resultMailbox = mailbox
 	}
-	return &pb.ListMailboxInboxResponse{Result: &pb.FetchMailboxInboxResult{
-		Mailbox:  resultMailbox,
+	return &mailboxv1.ListMailboxInboxResponse{Result: &mailboxv1.FetchMailboxInboxResult{
+		Mailbox:  publicMailbox(resultMailbox),
 		Messages: messages,
 	}}, nil
 }
 
-func (s *EmailService) WaitForEmail(ctx context.Context, request *pb.WaitForEmailRequest) (*pb.WaitForEmailResponse, error) {
+func (s *EmailService) WaitForEmail(ctx context.Context, request *mailboxv1.WaitForMailboxEmailRequest) (*mailboxv1.WaitForMailboxEmailResponse, error) {
 	timeoutSeconds := request.GetTimeoutSeconds()
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 300
 	}
 	email := request.GetEmailAddress()
 	issuedAfterUnix := request.GetIssuedAfterUnix()
-	logInfo("waiting for email message email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(email), timeoutSeconds, issuedAfterUnix)
+	logInfo("waiting for email message email=%s timeout_seconds=%d issued_after_unix=%d", emailx.Redact(email), timeoutSeconds, issuedAfterUnix)
 	if resp, ok, err := s.latestEmailResponse(ctx, request, issuedAfterUnix); err != nil {
 		return nil, waitError(ctx, err)
 	} else if ok {
 		return resp, nil
 	}
-	if s.providers.IsStoredInboxOnlyAddress(email) {
-		return s.waitForPersistedEmail(ctx, request, timeoutSeconds, issuedAfterUnix)
-	}
-	if err := s.watcher.PollForEmail(ctx, email); err != nil {
-		if !isAuthError(err) {
-			return nil, waitError(ctx, err)
-		}
-		logWarning("email poll auth error email=%s error=%v", redactEmail(email), err)
-	} else if resp, ok, err := s.latestEmailResponse(ctx, request, issuedAfterUnix); err != nil {
-		return nil, waitError(ctx, err)
-	} else if ok {
-		return resp, nil
-	}
-
 	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
-	for time.Now().Before(deadline) {
-		sleepFor := time.Duration(s.watcher.pollInterval) * time.Second
-		if remaining := time.Until(deadline); remaining < sleepFor {
-			sleepFor = remaining
-		}
-		if sleepFor > 0 {
-			timer := time.NewTimer(sleepFor)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, status.Error(codes.Canceled, "request cancelled")
-			case <-timer.C:
-			}
-		}
-		if err := s.watcher.PollForEmail(ctx, email); err != nil {
-			if !isAuthError(err) {
-				return nil, waitError(ctx, err)
-			}
-			continue
-		}
-		if resp, ok, err := s.latestEmailResponse(ctx, request, issuedAfterUnix); err != nil {
+	if !s.providers.IsStoredInboxOnlyAddress(email) {
+		if s.work == nil {
+			logWarning("mailbox email poll dispatcher is not configured email=%s", emailx.Redact(email))
+		} else if err := s.work.PublishEmailPollRequested(ctx, &mailboxv1.MailboxEmailPollRequest{
+			EmailAddress:    email,
+			SubjectKeyword:  strings.TrimSpace(request.GetSubjectKeyword()),
+			ParserProfile:   strings.TrimSpace(request.GetParserProfile()),
+			SignalKind:      request.GetSignalKind(),
+			IssuedAfterUnix: issuedAfterUnix,
+			DeadlineUnix:    deadline.Unix(),
+			Reason:          "wait_for_email",
+		}); err != nil {
 			return nil, waitError(ctx, err)
-		} else if ok {
-			return resp, nil
 		}
 	}
-	logInfo("email message not found email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(email), timeoutSeconds, issuedAfterUnix)
-	return &pb.WaitForEmailResponse{Found: false}, nil
+	return s.waitForPersistedEmail(ctx, request, timeoutSeconds, issuedAfterUnix)
 }
 
-func (s *EmailService) waitForPersistedEmail(ctx context.Context, request *pb.WaitForEmailRequest, timeoutSeconds int32, issuedAfterUnix int64) (*pb.WaitForEmailResponse, error) {
+func (s *EmailService) waitForPersistedEmail(ctx context.Context, request *mailboxv1.WaitForMailboxEmailRequest, timeoutSeconds int32, issuedAfterUnix int64) (*mailboxv1.WaitForMailboxEmailResponse, error) {
 	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
 	for time.Now().Before(deadline) {
 		sleepFor := time.Duration(s.watcher.pollInterval) * time.Second
@@ -261,17 +244,17 @@ func (s *EmailService) waitForPersistedEmail(ctx context.Context, request *pb.Wa
 			return resp, nil
 		}
 	}
-	logInfo("webhook-backed email message not found email=%s timeout_seconds=%d issued_after_unix=%d", redactEmail(request.GetEmailAddress()), timeoutSeconds, issuedAfterUnix)
-	return &pb.WaitForEmailResponse{Found: false}, nil
+	logInfo("webhook-backed email message not found email=%s timeout_seconds=%d issued_after_unix=%d", emailx.Redact(request.GetEmailAddress()), timeoutSeconds, issuedAfterUnix)
+	return &mailboxv1.WaitForMailboxEmailResponse{Found: false}, nil
 }
 
-func (s *EmailService) latestEmailResponse(ctx context.Context, request *pb.WaitForEmailRequest, issuedAfterUnix int64) (*pb.WaitForEmailResponse, bool, error) {
+func (s *EmailService) latestEmailResponse(ctx context.Context, request *mailboxv1.WaitForMailboxEmailRequest, issuedAfterUnix int64) (*mailboxv1.WaitForMailboxEmailResponse, bool, error) {
 	message, ok, err := s.store.LatestMessageWithSignal(ctx, request.GetEmailAddress(), request.GetSubjectKeyword(), issuedAfterUnix, request.GetParserProfile(), request.GetSignalKind())
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	logInfo("served persisted email for %s provider=%s received_at_unix=%d", redactEmail(request.GetEmailAddress()), message.GetProvider(), message.GetReceivedAtUnix())
-	return &pb.WaitForEmailResponse{Found: true, Message: message}, true, nil
+	logInfo("served persisted email for %s provider=%s received_at_unix=%d", emailx.Redact(request.GetEmailAddress()), message.GetProviderKey(), message.GetReceivedAtUnix())
+	return &mailboxv1.WaitForMailboxEmailResponse{Found: true, Message: message}, true, nil
 }
 
 func waitError(ctx context.Context, err error) error {

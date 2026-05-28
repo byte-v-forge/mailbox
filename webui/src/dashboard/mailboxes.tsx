@@ -1,20 +1,16 @@
 import { useState } from 'react';
 import type { ComponentType } from 'react';
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-  ToolbarActionButtons,
-  WorkspaceToolbar
-} from '@/dashboard/module-kit';
+  PanelTabs,
+  ToolbarActionButtons
+} from '@byte-v-forge/common-ui';
 import { CloudflareMailboxProviderPanel } from './mailbox-provider-cloudflare';
 import { MailboxImportSheet } from './mailbox-import';
 import { OutlookMailboxProviderPanel } from './mailbox-provider-outlook';
 import type { MailboxProviderPanelProps } from './mailbox-provider-types';
 import { providerToolbarActions } from './mailbox-toolbar-actions';
-import { capabilityForProvider, mailboxProviderConfigs, mailboxProviderValue, type MailboxProviderTab } from './mailbox-utils';
-import type { Job, Mailbox, MailboxDomain, MailboxProviderCapability } from './types';
+import { capabilityForProvider, mailboxProviderConfigs, mailboxProviderMatches, type MailboxProviderTab } from './mailbox-utils';
+import type { Mailbox, MailboxDomain, MailboxOperation, MailboxProviderCapability } from './types';
 export { MailboxDetails } from './mailbox-details';
 
 const providerComponents: Record<MailboxProviderTab, ComponentType<MailboxProviderPanelProps>> = {
@@ -35,36 +31,30 @@ export function MailboxPanel(props: MailboxPanelProps) {
   const providerViews = providerDefinitions.map((definition) => ({
     ...definition,
     capability: capabilityForProvider(props.providerCapabilities, definition.value),
-    mailboxes: props.mailboxes.filter((mailbox) => mailboxProviderValue(mailbox.provider) === definition.value),
+    mailboxes: props.mailboxes.filter((mailbox) => mailboxProviderMatches(mailbox.provider_key, definition.value)),
   }));
   const activeView = providerViews.find((view) => view.value === activeProvider) || providerViews[0];
   const toolbarActions = providerToolbarActions(activeView, props, setImportProvider);
 
   return (
-    <Tabs value={activeProvider} onValueChange={(value) => setActiveProvider(value as MailboxProviderTab)} className="min-h-0 flex-1 overflow-hidden">
-      <WorkspaceToolbar
-        tabs={<ProviderTabs views={providerViews} />}
+    <>
+      <PanelTabs
+        value={activeProvider}
+        onValueChange={(value) => setActiveProvider(value as MailboxProviderTab)}
+        tabsClassName="min-h-0 flex-1 overflow-hidden"
+        tabsListVariant="line"
+        tabsListClassName="h-8"
         actions={<ToolbarActionButtons actions={toolbarActions} />}
+        tabs={providerViews.map(({ value, label, capability, mailboxes, Component }) => ({
+          value,
+          label: capability?.display_name || label,
+          triggerClassName: 'gap-1.5 px-2',
+          contentClassName: 'overflow-auto',
+          content: <Component {...panelProps} mailboxes={mailboxes} capability={capability} />
+        }))}
       />
-      {providerViews.map(({ value, capability, mailboxes, Component }) => (
-        <TabsContent key={value} value={value} className="mt-0 min-h-0 overflow-auto">
-          <Component {...panelProps} mailboxes={mailboxes} capability={capability} />
-        </TabsContent>
-      ))}
       <MailboxImportSheet open={!!importProvider} provider={importProvider || activeProvider} busy={props.busy} onOpenChange={(open) => !open && setImportProvider(undefined)} onDone={props.onDone} onError={props.onError} />
-    </Tabs>
-  );
-}
-
-function ProviderTabs({ views }: { views: ProviderView[] }) {
-  return (
-    <TabsList variant="line" className="h-8">
-      {views.map((view) => (
-        <TabsTrigger key={view.value} value={view.value} className="gap-1.5 px-2">
-          {view.capability?.display_name || view.label}
-        </TabsTrigger>
-      ))}
-    </TabsList>
+    </>
   );
 }
 
@@ -92,12 +82,11 @@ type MailboxPanelProps = {
   oauthing: string;
   inboxLoading: boolean;
   domainSyncing: boolean;
-  runningWorkflowByEmail: Map<string, Job>;
+  runningOperationByEmail: Map<string, MailboxOperation>;
   onSelect: (mailbox: Mailbox) => void;
-  onOpenWorkflow: (job: Job) => void;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onFetchInbox: () => Promise<void>;
-  onSyncDomains: () => Promise<void>;
+  onSyncDomains: (providerKey: string) => Promise<void>;
   onToggleSecrets: () => void;
   onDelete: (mailbox: Mailbox) => Promise<void>;
   onDone: (message: string) => void;
@@ -113,9 +102,8 @@ function providerPanelProps(props: MailboxPanelProps): Omit<MailboxProviderPanel
     oauthing: props.oauthing,
     inboxLoading: props.inboxLoading,
     domainSyncing: props.domainSyncing,
-    runningWorkflowByEmail: props.runningWorkflowByEmail,
+    runningOperationByEmail: props.runningOperationByEmail,
     onSelect: props.onSelect,
-    onOpenWorkflow: props.onOpenWorkflow,
     onOAuth: props.onOAuth,
     onFetchInbox: props.onFetchInbox,
     onSyncDomains: props.onSyncDomains,

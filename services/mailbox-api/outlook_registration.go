@@ -1,6 +1,9 @@
 package main
 
 import (
+	"github.com/byte-v-forge/common-lib/emailx"
+	"github.com/byte-v-forge/common-lib/envx"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	browserautomationv1 "github.com/byte-v-forge/browser-automation/gen/go/byte/v/forge/contracts/browserautomation/v1"
+	browserautomationv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/browserautomation/v1"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -70,22 +73,22 @@ type oauthResult struct {
 }
 
 func loadOutlookRegistrationConfig() outlookRegistrationConfig {
-	locale := envDefault("OUTLOOK_REGISTER_AUTOMATION_LOCALE", "en-US")
+	locale := envx.StringDefault("OUTLOOK_REGISTER_AUTOMATION_LOCALE", "en-US")
 	return outlookRegistrationConfig{
-		resultsDir:     envDefault("OUTLOOK_REGISTER_RESULTS_DIR", defaultOutlookResultsDir),
-		proxyRef:       envDefault("OUTLOOK_REGISTER_AUTOMATION_PROXY_REF", "outlook"),
+		resultsDir:     envx.StringDefault("OUTLOOK_REGISTER_RESULTS_DIR", defaultOutlookResultsDir),
+		proxyRef:       envx.StringDefault("OUTLOOK_REGISTER_AUTOMATION_PROXY_REF", "outlook"),
 		locale:         locale,
-		acceptLanguage: envDefault("OUTLOOK_REGISTER_AUTOMATION_ACCEPT_LANGUAGE", acceptLanguage(locale)),
-		timezone:       envDefault("OUTLOOK_REGISTER_AUTOMATION_TIMEZONE", ""),
-		userAgent:      envDefault("OUTLOOK_REGISTER_AUTOMATION_USER_AGENT", ""),
-		windowWidth:    envPositiveInt("OUTLOOK_REGISTER_AUTOMATION_WINDOW_WIDTH", defaultOutlookBrowserViewportWide),
-		windowHeight:   envPositiveInt("OUTLOOK_REGISTER_AUTOMATION_WINDOW_HEIGHT", defaultOutlookBrowserViewportHigh),
-		sessionTTL:     envDurationSeconds("OUTLOOK_REGISTER_AUTOMATION_SESSION_TTL_SECONDS", defaultOutlookBrowserSessionTTL),
-		commandTimeout: envDurationSeconds("OUTLOOK_REGISTER_AUTOMATION_COMMAND_TIMEOUT_SECONDS", defaultOutlookCommandTimeout),
-		oauthClientID:  envDefault("OUTLOOK_REGISTER_OAUTH_CLIENT_ID", defaultOutlookOAuthClientID),
-		oauthRedirect:  envDefault("OUTLOOK_REGISTER_OAUTH_REDIRECT_URL", defaultOutlookOAuthRedirectURL),
-		oauthScopes:    splitScopes(envDefault("OUTLOOK_REGISTER_OAUTH_SCOPES", defaultOutlookOAuthScopes)),
-		httpTimeout:    envDurationSeconds("OUTLOOK_REGISTER_HTTP_TIMEOUT_SECONDS", 30*time.Second),
+		acceptLanguage: envx.StringDefault("OUTLOOK_REGISTER_AUTOMATION_ACCEPT_LANGUAGE", acceptLanguage(locale)),
+		timezone:       envx.StringDefault("OUTLOOK_REGISTER_AUTOMATION_TIMEZONE", ""),
+		userAgent:      envx.StringDefault("OUTLOOK_REGISTER_AUTOMATION_USER_AGENT", ""),
+		windowWidth:    envx.PositiveInt("OUTLOOK_REGISTER_AUTOMATION_WINDOW_WIDTH", defaultOutlookBrowserViewportWide),
+		windowHeight:   envx.PositiveInt("OUTLOOK_REGISTER_AUTOMATION_WINDOW_HEIGHT", defaultOutlookBrowserViewportHigh),
+		sessionTTL:     envx.PositiveDurationSeconds("OUTLOOK_REGISTER_AUTOMATION_SESSION_TTL_SECONDS", defaultOutlookBrowserSessionTTL),
+		commandTimeout: envx.PositiveDurationSeconds("OUTLOOK_REGISTER_AUTOMATION_COMMAND_TIMEOUT_SECONDS", defaultOutlookCommandTimeout),
+		oauthClientID:  envx.StringDefault("OUTLOOK_REGISTER_OAUTH_CLIENT_ID", defaultOutlookOAuthClientID),
+		oauthRedirect:  envx.StringDefault("OUTLOOK_REGISTER_OAUTH_REDIRECT_URL", defaultOutlookOAuthRedirectURL),
+		oauthScopes:    splitScopes(envx.StringDefault("OUTLOOK_REGISTER_OAUTH_SCOPES", defaultOutlookOAuthScopes)),
+		httpTimeout:    envx.PositiveDurationSeconds("OUTLOOK_REGISTER_HTTP_TIMEOUT_SECONDS", 30*time.Second),
 	}
 }
 
@@ -111,7 +114,7 @@ func (r *outlookRegistrationRunner) RunMailboxRegistration(ctx context.Context, 
 	if len(records) > 0 {
 		return registrationResponse(records, nil), nil
 	}
-	if !req.GetEnabled() || !envBool("OUTLOOK_REGISTER_ENABLED", false) {
+	if !req.GetEnabled() || !envx.Bool("OUTLOOK_REGISTER_ENABLED", false) {
 		return &pb.RunMailboxRegistrationResponse{Success: false, ExitCode: 0, ErrorMessage: "mailbox registration is disabled"}, nil
 	}
 	return &pb.RunMailboxRegistrationResponse{
@@ -360,14 +363,14 @@ func registrationResponse(records []mailboxRecord, err error) *pb.RunMailboxRegi
 }
 
 func selectOAuthTargets(req *pb.RunMailboxOAuthRequest) []*pb.MailboxRegistrationAccount {
-	requested := normalizeEmail(req.GetEmailAddress())
+	requested := emailx.Normalize(req.GetEmailAddress())
 	limit := req.GetLimit()
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	targets := make([]*pb.MailboxRegistrationAccount, 0, len(req.GetAccounts()))
 	for _, account := range req.GetAccounts() {
-		email := normalizeEmail(account.GetEmailAddress())
+		email := emailx.Normalize(account.GetEmailAddress())
 		if email == "" {
 			continue
 		}
@@ -438,7 +441,7 @@ func parseTokenFile(path string) ([]mailboxRecord, error) {
 		if len(parts) < 3 {
 			continue
 		}
-		email := normalizeEmail(parts[0])
+		email := emailx.Normalize(parts[0])
 		if email == "" {
 			continue
 		}
@@ -471,7 +474,7 @@ func parsePasswordFile(path string) ([]mailboxRecord, error) {
 			continue
 		}
 		email, password, _ := strings.Cut(line, ":")
-		if email = normalizeEmail(email); email != "" {
+		if email = emailx.Normalize(email); email != "" {
 			records = append(records, mailboxRecord{email: email, password: strings.TrimSpace(password), source: filepath.Base(path)})
 		}
 	}
@@ -557,30 +560,6 @@ func acceptLanguage(locale string) string {
 		return "id-ID,id;q=0.9,en;q=0.8"
 	}
 	return "en-US,en;q=0.9"
-}
-
-func envPositiveInt(name string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	var parsed int
-	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || parsed <= 0 {
-		return fallback
-	}
-	return parsed
-}
-
-func envBool(name string, fallback bool) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
-	if value == "" {
-		return fallback
-	}
-	return value == "1" || value == "true" || value == "yes" || value == "on"
-}
-
-func envDurationSeconds(name string, fallback time.Duration) time.Duration {
-	return time.Duration(envPositiveInt(name, int(fallback/time.Second))) * time.Second
 }
 
 func sanitizeURL(value string) string {

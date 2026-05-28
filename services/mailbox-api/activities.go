@@ -6,29 +6,26 @@ import (
 	"log"
 	"strings"
 
-	workflowruntime "github.com/byte-v-forge/workflow-runtime"
+	"github.com/byte-v-forge/common-lib/emailx"
 
 	"mailboxapi/pb"
 )
 
 const (
-	activityErrorMailboxRegistrationUnavailable = "MAILBOX_REGISTRATION_UNAVAILABLE"
-	activityErrorMailboxRegistrationEmpty       = "MAILBOX_REGISTRATION_EMPTY"
-	activityErrorMailboxOAuthUnavailable        = "MAILBOX_OAUTH_UNAVAILABLE"
-	activityErrorMailboxOAuthEmpty              = "MAILBOX_OAUTH_EMPTY"
-	emailAuthAuthorized                         = "AUTHORIZED"
-	emailAuthOAuthPending                       = "OAUTH_PENDING"
-	emailAuthFailed                             = "AUTH_FAILED"
-	emailAuthNeedsManualVerification            = "NEEDS_MANUAL_VERIFICATION"
+	emailAuthAuthorized              = "AUTHORIZED"
+	emailAuthOAuthPending            = "OAUTH_PENDING"
+	emailAuthFailed                  = "AUTH_FAILED"
+	emailAuthNeedsManualVerification = "NEEDS_MANUAL_VERIFICATION"
 )
 
 type mailboxActivities struct {
 	outlookRegistration *outlookRegistrationRunner
 	emailBackend        emailBackend
 	operations          *operationStore
+	hot                 *mailboxHotStream
 }
 
-func (a *mailboxActivities) RunMailboxRegistration(ctx context.Context, input registerMailboxWorkflowInput) (mailboxOperationResult, error) {
+func (a *mailboxActivities) runMailboxRegistration(ctx context.Context, input mailboxRegistrationActionInput) (mailboxOperationResult, error) {
 	operationID := strings.TrimSpace(input.OperationID)
 	if err := a.markRunning(ctx, operationID, "run_registration"); err != nil {
 		return mailboxOperationResult{OperationID: operationID, ErrorMessage: err.Error()}, err
@@ -45,7 +42,7 @@ func (a *mailboxActivities) RunMailboxRegistration(ctx context.Context, input re
 			LastStep:     "run_registration",
 			ErrorMessage: message,
 		})
-		return mailboxOperationResult{OperationID: operationID, Success: false, ErrorMessage: message}, workflowruntime.NewRetryableActivityError(activityErrorMailboxRegistrationUnavailable, message, err)
+		return mailboxOperationResult{OperationID: operationID, Success: false, ErrorMessage: message}, err
 	}
 	if resp == nil {
 		message := "mailbox registration runner returned empty response"
@@ -54,7 +51,7 @@ func (a *mailboxActivities) RunMailboxRegistration(ctx context.Context, input re
 			LastStep:     "run_registration",
 			ErrorMessage: message,
 		})
-		return mailboxOperationResult{OperationID: operationID, Success: false, ErrorMessage: message}, workflowruntime.NewNonRetryableActivityError(activityErrorMailboxRegistrationEmpty, message, nil)
+		return mailboxOperationResult{OperationID: operationID, Success: false, ErrorMessage: message}, fmt.Errorf("%s", message)
 	}
 
 	result := mailboxOperationResult{
@@ -98,29 +95,29 @@ func (a *mailboxActivities) SelectMailboxOAuthAccounts(ctx context.Context, req 
 
 func (a *mailboxActivities) RunMailboxOAuthAccount(ctx context.Context, req *pb.RunMailboxOAuthAccountRequest) (*pb.RunMailboxOAuthAccountResponse, error) {
 	account := req.GetAccount()
-	if account == nil || normalizeEmail(account.GetEmailAddress()) == "" {
+	if account == nil || emailx.Normalize(account.GetEmailAddress()) == "" {
 		return &pb.RunMailboxOAuthAccountResponse{Result: &pb.MailboxOAuthResult{
 			Success:      false,
 			ErrorMessage: "mailbox OAuth account is required",
 		}}, nil
 	}
 	resp, err := a.outlookRegistration.RunMailboxOAuth(ctx, &pb.RunMailboxOAuthRequest{
-		EmailAddress: normalizeEmail(account.GetEmailAddress()),
+		EmailAddress: emailx.Normalize(account.GetEmailAddress()),
 		OnlyMissing:  false,
 		Limit:        1,
 		Accounts:     []*pb.MailboxRegistrationAccount{account},
 	})
 	if err != nil {
 		message := fmt.Sprintf("run mailbox OAuth: %v", err)
-		return nil, workflowruntime.NewRetryableActivityError(activityErrorMailboxOAuthUnavailable, message, err)
+		return nil, fmt.Errorf("%s", message)
 	}
 	if resp == nil {
 		message := "mailbox registration runner returned empty OAuth response"
-		return nil, workflowruntime.NewNonRetryableActivityError(activityErrorMailboxOAuthEmpty, message, nil)
+		return nil, fmt.Errorf("%s", message)
 	}
 	if len(resp.GetResults()) == 0 {
 		return &pb.RunMailboxOAuthAccountResponse{Result: &pb.MailboxOAuthResult{
-			EmailAddress: normalizeEmail(account.GetEmailAddress()),
+			EmailAddress: emailx.Normalize(account.GetEmailAddress()),
 			Success:      false,
 			ErrorMessage: "mailbox OAuth returned no result",
 		}}, nil
@@ -198,15 +195,18 @@ func (a *mailboxActivities) finishOperation(ctx context.Context, operationID str
 }
 
 func (a *mailboxActivities) updateOperation(ctx context.Context, operationID string, update operationUpdate) {
-	if _, err := a.operations.update(ctx, operationID, update); err != nil {
+	operation, err := a.operations.update(ctx, operationID, update)
+	if err != nil {
 		log.Printf("update mailbox operation failed operation=%s: %v", operationID, err)
+		return
 	}
+	a.hot.PublishOperation(ctx, operation)
 }
 
 func registeredMailboxCount(accounts []*pb.MailboxRegistrationAccount) int32 {
 	var count int32
 	for _, account := range accounts {
-		if normalizeEmail(account.GetEmailAddress()) != "" {
+		if emailx.Normalize(account.GetEmailAddress()) != "" {
 			count++
 		}
 	}
@@ -215,7 +215,7 @@ func registeredMailboxCount(accounts []*pb.MailboxRegistrationAccount) int32 {
 
 func (a *mailboxActivities) persistRegisteredAccounts(ctx context.Context, accounts []*pb.MailboxRegistrationAccount) error {
 	for _, account := range accounts {
-		email := normalizeEmail(account.GetEmailAddress())
+		email := emailx.Normalize(account.GetEmailAddress())
 		password := strings.TrimSpace(account.GetPassword())
 		if email == "" {
 			continue
@@ -238,7 +238,7 @@ func (a *mailboxActivities) persistRegisteredAccounts(ctx context.Context, accou
 }
 
 func (a *mailboxActivities) oauthAccounts(ctx context.Context, emailAddress string, onlyMissing bool, limit int32) ([]*pb.MailboxRegistrationAccount, error) {
-	requestedEmail := normalizeEmail(emailAddress)
+	requestedEmail := emailx.Normalize(emailAddress)
 	selectedLimit := limit
 	if requestedEmail != "" {
 		selectedLimit = 500
@@ -252,7 +252,7 @@ func (a *mailboxActivities) oauthAccounts(ctx context.Context, emailAddress stri
 	}
 	accounts := make([]*pb.MailboxRegistrationAccount, 0, len(resp.GetMailboxes()))
 	for _, mailbox := range resp.GetMailboxes() {
-		email := normalizeEmail(mailbox.GetEmailAddress())
+		email := emailx.Normalize(mailbox.GetEmailAddress())
 		if email == "" {
 			continue
 		}
@@ -289,12 +289,12 @@ func (a *mailboxActivities) oauthAccounts(ctx context.Context, emailAddress stri
 func (a *mailboxActivities) persistOAuthResults(ctx context.Context, results []*pb.MailboxOAuthResult, accounts []*pb.MailboxRegistrationAccount) error {
 	accountByEmail := make(map[string]*pb.MailboxRegistrationAccount, len(accounts))
 	for _, account := range accounts {
-		if email := normalizeEmail(account.GetEmailAddress()); email != "" {
+		if email := emailx.Normalize(account.GetEmailAddress()); email != "" {
 			accountByEmail[email] = account
 		}
 	}
 	for _, result := range results {
-		email := normalizeEmail(result.GetEmailAddress())
+		email := emailx.Normalize(result.GetEmailAddress())
 		if email == "" {
 			continue
 		}
@@ -335,25 +335,25 @@ func (a *mailboxActivities) persistOAuthResults(ctx context.Context, results []*
 func (a *mailboxActivities) upsertMailbox(ctx context.Context, mailbox *pb.EmailMailbox) error {
 	resp, err := a.emailBackend.UpsertMailbox(ctx, &pb.UpsertEmailMailboxRequest{Mailbox: mailbox})
 	if err != nil {
-		return fmt.Errorf("upsert mailbox %s: %w", normalizeEmail(mailbox.GetEmailAddress()), err)
+		return fmt.Errorf("upsert mailbox %s: %w", emailx.Normalize(mailbox.GetEmailAddress()), err)
 	}
 	if resp == nil || resp.GetMailbox() == nil {
-		return fmt.Errorf("email service returned empty mailbox for %s", normalizeEmail(mailbox.GetEmailAddress()))
+		return fmt.Errorf("email service returned empty mailbox for %s", emailx.Normalize(mailbox.GetEmailAddress()))
 	}
 	return nil
 }
 
 func (a *mailboxActivities) markEmailAuthStatus(ctx context.Context, email string, authStatus string, lastError string) error {
 	resp, err := a.emailBackend.MarkEmailAuthStatus(ctx, &pb.MarkEmailAuthStatusRequest{
-		EmailAddress: normalizeEmail(email),
+		EmailAddress: emailx.Normalize(email),
 		AuthStatus:   authStatus,
 		LastError:    strings.TrimSpace(lastError),
 	})
 	if err != nil {
-		return fmt.Errorf("mark mailbox auth status %s: %w", normalizeEmail(email), err)
+		return fmt.Errorf("mark mailbox auth status %s: %w", emailx.Normalize(email), err)
 	}
 	if resp == nil || resp.GetMailbox() == nil {
-		return fmt.Errorf("email service returned empty auth status response for %s", normalizeEmail(email))
+		return fmt.Errorf("email service returned empty auth status response for %s", emailx.Normalize(email))
 	}
 	return nil
 }

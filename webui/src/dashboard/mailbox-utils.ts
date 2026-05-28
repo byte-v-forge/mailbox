@@ -1,11 +1,9 @@
-import { objectValue, stringValue } from '@/dashboard/module-kit';
-import { stepDetailData } from '@/dashboard/modules/workflow/sdk';
-import { MailboxProviderAction } from '@/proto/mailbox_service';
+import { MailboxCredentialKind, MailboxProviderAction } from '@byte-v-forge/common-ui';
 import { normalizeUiEmail } from './email-utils';
-import { mailboxProviderConfig, mailboxProviderConfigs, mailboxProviderValue, type MailboxProviderTab } from './mailbox-provider-config';
-import type { Job, Mailbox, MailboxProviderActionCapability, MailboxProviderCapability } from './types';
+import { mailboxProviderConfig, mailboxProviderConfigs, mailboxProviderMatches, mailboxProviderTabFor, mailboxProviderValue, type MailboxProviderTab } from './mailbox-provider-config';
+import type { Mailbox, MailboxProviderActionCapability, MailboxProviderCapability } from './types';
 
-export { mailboxProviderConfig, mailboxProviderConfigs, mailboxProviderValue, type MailboxProviderTab };
+export { mailboxProviderConfig, mailboxProviderConfigs, mailboxProviderMatches, mailboxProviderTabFor, mailboxProviderValue, type MailboxProviderTab };
 export type MailboxActionKey = 'import_mailbox' | 'run_oauth' | 'fetch_inbox' | 'receive_webhook' | 'auto_create_mailbox' | 'sync_domains';
 
 export type MailboxBatchItem = {
@@ -22,14 +20,14 @@ export const mailboxActions = {
   syncDomains: 'sync_domains'
 } as const;
 
-const mailboxActionByProto = {
+const mailboxActionByProto: Partial<Record<MailboxProviderAction, MailboxActionKey>> = {
   [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_IMPORT_MAILBOX]: mailboxActions.importMailbox,
   [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_RUN_OAUTH]: mailboxActions.runOAuth,
   [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_FETCH_INBOX]: mailboxActions.fetchInbox,
   [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_RECEIVE_WEBHOOK]: mailboxActions.receiveWebhook,
   [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_AUTO_CREATE_MAILBOX]: mailboxActions.autoCreateMailbox,
   [MailboxProviderAction.MAILBOX_PROVIDER_ACTION_SYNC_DOMAINS]: mailboxActions.syncDomains
-} satisfies Partial<Record<MailboxProviderAction, MailboxActionKey>>;
+};
 
 export function domainForEmail(email: string) {
   const [, domain = ''] = normalizeUiEmail(email).split('@');
@@ -41,7 +39,7 @@ export function uniqueStrings(values: string[]) {
 }
 
 export function tokenText(mailbox: Mailbox) {
-  const configured = mailboxProviderConfig(mailbox.provider).tokenText;
+  const configured = mailboxProviderConfig(mailbox.provider_key).tokenText;
   if (typeof configured === 'function') return configured(mailbox);
   if (configured) return configured;
   if (mailbox.refresh_token && authStatus(mailbox) === 'AUTHORIZED') return 'Refresh 可用';
@@ -59,20 +57,6 @@ export function authStatus(mailbox: Mailbox) {
   if (value) return value;
   if (mailbox.refresh_token) return 'AUTHORIZED';
   return 'OAUTH_PENDING';
-}
-
-export function mailboxWorkflowEmail(job: Job) {
-  if (job.action !== 'MAILBOX_OAUTH') return '';
-  const candidates = [objectValue(job.result)];
-  for (const step of job.steps || []) {
-    const detail = stepDetailData(step);
-    if (detail) candidates.push(detail);
-  }
-  for (const data of candidates) {
-    const email = normalizeUiEmail(stringValue(data.email_address));
-    if (email) return email;
-  }
-  return '';
 }
 
 export function parseMailboxBatch(value: string, provider: string) {
@@ -109,10 +93,9 @@ export function parseMailboxBatch(value: string, provider: string) {
 }
 
 export function capabilityForProvider(capabilities: MailboxProviderCapability[], provider: string) {
-  const target = mailboxProviderValue(provider);
-  return capabilities.find((capability) => (
-    mailboxProviderValue(capability.key || String(capability.provider || '')) === target
-  ));
+  const target = mailboxProviderTabFor(provider);
+  if (!target) return undefined;
+  return capabilities.find((capability) => mailboxProviderMatches(capability.key, target));
 }
 
 export function providerAction(capability: MailboxProviderCapability | undefined, action: MailboxActionKey) {
@@ -121,7 +104,7 @@ export function providerAction(capability: MailboxProviderCapability | undefined
 
 export function canRunMailboxAction(mailbox: Mailbox, action: MailboxProviderActionCapability | undefined) {
   if (!action) return false;
-  if (!requiredFieldsPresent(mailbox, action.required_mailbox_fields || [])) return false;
+  if (!requiredCredentialsPresent(mailbox, action.required_credentials || [])) return false;
   const statuses = action.required_auth_statuses || [];
   return statuses.length === 0 || statuses.includes(authStatus(mailbox));
 }
@@ -132,18 +115,28 @@ export function bulkMailboxActionCount(mailboxes: Mailbox[], action: MailboxProv
 }
 
 export function canRunProviderMailboxAction(capabilities: MailboxProviderCapability[], mailbox: Mailbox, action: MailboxActionKey) {
-  return canRunMailboxAction(mailbox, providerAction(capabilityForProvider(capabilities, mailbox.provider), action));
+  return canRunMailboxAction(mailbox, providerAction(capabilityForProvider(capabilities, mailbox.provider_key), action));
 }
 
 export function actionKey(action: MailboxProviderAction): MailboxActionKey | '' {
   return mailboxActionByProto[action] || '';
 }
 
-function requiredFieldsPresent(mailbox: Mailbox, fields: string[]) {
-  const values: Record<string, string> = {
-    password: mailbox.password,
-    refresh_token: mailbox.refresh_token,
-    access_token: mailbox.access_token
-  };
-  return fields.every((field) => !!String(values[field] || '').trim());
+function requiredCredentialsPresent(mailbox: Mailbox, credentials: MailboxCredentialKind[]) {
+  return credentials.every((credential) => credentialPresent(mailbox, credential));
+}
+
+function credentialPresent(mailbox: Mailbox, credential: MailboxCredentialKind) {
+  switch (credential) {
+    case MailboxCredentialKind.MAILBOX_CREDENTIAL_KIND_UNSPECIFIED:
+      return true;
+    case MailboxCredentialKind.MAILBOX_CREDENTIAL_KIND_PASSWORD:
+      return !!String(mailbox.password || '').trim();
+    case MailboxCredentialKind.MAILBOX_CREDENTIAL_KIND_OAUTH_REFRESH_TOKEN:
+      return !!String(mailbox.refresh_token || '').trim();
+    case MailboxCredentialKind.MAILBOX_CREDENTIAL_KIND_OAUTH_ACCESS_TOKEN:
+      return !!String(mailbox.access_token || '').trim();
+    default:
+      return false;
+  }
 }

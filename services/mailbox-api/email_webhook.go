@@ -1,6 +1,10 @@
 package main
 
 import (
+	"github.com/byte-v-forge/common-lib/emailx"
+	"github.com/byte-v-forge/common-lib/envx"
+	"github.com/byte-v-forge/common-lib/redisx"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,15 +15,15 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protojson"
+	"github.com/byte-v-forge/common-lib/protojsonx"
 
 	"mailboxapi/pb"
 )
 
 type graphWebhookHandler struct {
-	store    *MailboxStore
-	watcher  *MailWatcher
-	scanGate chan struct{}
+	store       *MailboxStore
+	watcher     *MailWatcher
+	refreshLock *redisx.BestEffortLocker
 }
 
 type graphNotificationEnvelope struct {
@@ -33,16 +37,16 @@ type graphNotification struct {
 	ChangeType     string `json:"changeType"`
 }
 
-func startWebhookServer(ctx context.Context, addr string, store *MailboxStore, watcher *MailWatcher, errCh chan<- error) {
+func startWebhookServer(ctx context.Context, addr string, store *MailboxStore, watcher *MailWatcher, refreshLock *redisx.BestEffortLocker, errCh chan<- error) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return
 	}
 
 	handler := &graphWebhookHandler{
-		store:    store,
-		watcher:  watcher,
-		scanGate: make(chan struct{}, 1),
+		store:       store,
+		watcher:     watcher,
+		refreshLock: refreshLock,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhooks/email/cloudflare", handler.handleCloudflareEmail)
@@ -88,18 +92,18 @@ func (h *graphWebhookHandler) handleCloudflareEmail(w http.ResponseWriter, r *ht
 		return
 	}
 	var event pb.InboundEmailWebhook
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(raw, &event); err != nil {
+	if err := protojsonx.Unmarshal(raw, &event); err != nil {
 		http.Error(w, "invalid email event", http.StatusBadRequest)
 		return
 	}
-	event.Provider = emailProviderCloudflare
+	event.ProviderKey = emailProviderCloudflare
 	messages, err := h.store.RecordInboundEmail(r.Context(), &event)
 	if err != nil {
 		logWarning("record Cloudflare email webhook: %v", err)
 		http.Error(w, "record email event failed", http.StatusInternalServerError)
 		return
 	}
-	h.watcher.DispatchMailboxEvents(messages)
+	h.watcher.DispatchMailboxEvents(r.Context(), messages)
 	logInfo("recorded Cloudflare email event recipients=%d message_id=%s", len(event.GetRecipients()), event.GetMessageId())
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -193,22 +197,34 @@ func webhookSecret() string {
 }
 
 func (h *graphWebhookHandler) triggerRefresh() {
-	select {
-	case h.scanGate <- struct{}{}:
-		go h.refreshMailboxes()
-	default:
-		logInfo("Outlook webhook refresh already running")
+	if h.refreshLock == nil {
+		logWarning("Outlook webhook refresh lock is not configured")
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	lock, err := h.refreshLock.Lock(ctx, "graph-webhook-refresh")
+	cancel()
+	if err != nil {
+		logInfo("Outlook webhook refresh already running")
+		return
+	}
+	go h.refreshMailboxes(lock)
 }
 
-func (h *graphWebhookHandler) refreshMailboxes() {
-	defer func() { <-h.scanGate }()
+func (h *graphWebhookHandler) refreshMailboxes(lock *redisx.Lock) {
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := lock.Unlock(unlockCtx); err != nil {
+			logWarning("release Outlook webhook refresh lock failed: %v", err)
+		}
+	}()
 
-	timeout := envInt("OUTLOOK_WEBHOOK_FETCH_TIMEOUT_SECONDS", defaultWebhookTimeout)
+	timeout := envx.Int("OUTLOOK_WEBHOOK_FETCH_TIMEOUT_SECONDS", defaultWebhookTimeout)
 	if timeout <= 0 {
 		timeout = defaultWebhookTimeout
 	}
-	limit := envInt("OUTLOOK_WEBHOOK_MAX_MAILBOXES", defaultWebhookMaxMailboxes)
+	limit := envx.Int("OUTLOOK_WEBHOOK_MAX_MAILBOXES", defaultWebhookMaxMailboxes)
 	if limit <= 0 {
 		limit = defaultWebhookMaxMailboxes
 	}
@@ -226,7 +242,7 @@ func (h *graphWebhookHandler) refreshMailboxes() {
 	for _, mailbox := range mailboxes {
 		if _, err := h.watcher.FetchMailboxInbox(ctx, mailbox, int32(h.watcher.messageLimit), 0); err != nil {
 			failed++
-			logWarning("webhook mailbox refresh failed for %s: %v", redactEmail(mailbox.GetEmailAddress()), err)
+			logWarning("webhook mailbox refresh failed for %s: %v", emailx.Redact(mailbox.GetEmailAddress()), err)
 			continue
 		}
 		fetched++

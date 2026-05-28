@@ -1,16 +1,19 @@
 # mailbox
 
-Mailbox 领域仓，承载邮箱账号、Outlook provider、邮箱注册和 OAuth workflow。
+Mailbox 领域仓，承载邮箱账号、Outlook provider、邮箱注册/OAuth MQ 编排和收件能力。
 
 ## 目录
 
-- `services/mailbox-api`：Mailbox 领域 gRPC API 和唯一服务进程，内置 Outlook/Cloudflare provider adapter、邮箱注册导入、Outlook OAuth 编排、收件、webhook 和邮件信号解析能力。
+- `services/mailbox-api`：Mailbox 领域 gRPC API 和唯一服务进程，内置 Outlook/Cloudflare provider adapter、邮箱注册/OAuth MQ worker、收件、webhook 和邮件信号解析能力。
 - `Dockerfile`：部署入口，只构建并启动 mailbox API 一个进程。
 - `workers/cloudflare-email-relay`：Cloudflare Email Routing Worker，将 CF 入站邮件转发到 mailbox webhook。
 - `proto/email.proto`：邮件读取服务契约。
 - `proto/mailbox_register.proto`：邮箱注册与 OAuth 编排模型。
 - `proto/mailbox_service.proto`：Mailbox 领域 API 契约。
-- `proto/mail_dns.proto`：邮箱 DNS 管理契约。
+
+跨仓公开 mailbox 建模统一引用 `common-lib/proto/byte/v/forge/contracts/mailbox/v1/mailbox.proto`。
+`mailbox` 仓内部 `email.proto` 可以保存 password、refresh/access token 等拥有方细节；
+对外收件结果、provider capability 和 domain 投影只暴露 common-lib 公共模型与 `credential_state`。
 
 ## 生成
 
@@ -22,9 +25,11 @@ sh scripts/generate-proto.sh
 
 ## 配置
 
-`services/mailbox-api` 的 workflow activity 负责邮箱注册导入、OAuth 结果获取和邮箱存储写入。Outlook OAuth 浏览器 profile 通过 `BROWSER_AUTOMATION_ADDR`、`OUTLOOK_REGISTER_AUTOMATION_PROXY_REF`、`OUTLOOK_REGISTER_AUTOMATION_LOCALE` 和 `OUTLOOK_REGISTER_AUTOMATION_TIMEZONE` 配置。
+`services/mailbox-api` 直接内置 Outlook 和 Cloudflare provider adapter，并通过 `MAILBOX_PG_DSN` 维护邮箱、邮件和操作状态投影。
 
-`services/mailbox-api` 直接内置 Outlook 和 Cloudflare provider adapter，并通过 `MAILBOX_PG_DSN` 维护邮箱、邮件和操作状态投影。注册和 OAuth 流程由 mailbox workflow worker 执行，使用 `WORKFLOW_RUNTIME_ADDRESS`、`WORKFLOW_RUNTIME_NAMESPACE`、`WORKFLOW_RUNTIME_TASK_QUEUE` 和 `WORKFLOW_RUNTIME_IDENTITY` 连接运行时。
+Outlook 注册和 OAuth 通过 mailbox 内置 MQ worker 编排：`RegisterMailbox` / `RunMailboxOAuth` 只创建 operation 并发布 `mailbox.registration.operation_requested` / `mailbox.oauth.operation_requested` 到 `platform-nats`，由 mailbox worker 消费后调用 `browser-automation` 执行并更新 operation 投影。claim owner、lease、attempt count、OAuth limit/only_missing 只保存在 mailbox 内部表中，不进入 dashboard/API 对外 `MailboxOperation` 模型。
+
+Outlook 注册/OAuth 浏览器 profile 通过 `BROWSER_AUTOMATION_ADDR`、`OUTLOOK_REGISTER_AUTOMATION_PROXY_REF`、`OUTLOOK_REGISTER_AUTOMATION_LOCALE` 和 `OUTLOOK_REGISTER_AUTOMATION_TIMEZONE` 配置。
 
 Outlook 邮件读取使用 Microsoft Graph Go SDK，默认读取当前 OAuth 用户的 messages，并用 `Prefer: outlook.body-content-type="text"` 请求文本正文；只有显式覆盖 `OUTLOOK_GRAPH_MESSAGES_URL` 时才走兼容 REST adapter。
 
@@ -34,27 +39,9 @@ Cloudflare 邮件是主动推送链路：Email Routing Worker 收到邮件后把
 
 邮件内容会先落库，再通过 mailbox 通用解析器生成 `EmailSignal`。通用解析器只识别验证码等可复用邮件信号；业务状态判断由业务服务通过 webhook 或查询读取邮件后自行完成。
 
-实时下游通知使用 `MAILBOX_OUTBOUND_WEBHOOKS_FILE` 指向结构化配置文件。文件内容使用 `proto/mailbox_service.proto` 里的 `OutboundEmailWebhookList` proto JSON，过滤规则参考 Cloudflare Email Workers 暴露的 envelope sender、envelope recipient、headers/subject 和 raw body 能力，只保留必要字段：provider、recipient email/domain、sender email/domain、subject keyword 和 signal kind。domain 规则同时匹配自身和子域，例如 `openai.com` 会匹配 `tm.openai.com`。默认不发送正文，只有 `include_body` 为 true 时才发送截断后的文本正文；认证 token 通过 `token_env` 指向环境变量，不写进配置文件。
+`CACHE_REDIS_URL` 是 mailbox 运行时协调依赖：新入库邮件按邮箱写入业务 Redis 近期热缓存，`WaitForMailboxEmail` 只读近期缓存/PostgreSQL 投影；需要 Outlook provider 拉取时先发布 `mailbox.email.poll_requested` 到 `platform-nats`，由 mailbox poll worker 消费执行。UI 实时刷新通过 HotStream/NATS Core 的非持久化通知触发前端重新查询；`MAILBOX_INBOX_LOCK_KEY_PREFIX` 用于跨副本抓取锁和 Outlook webhook refresh 锁。Redis 仅作为热点读取与协调层，不作为邮件领域状态真源。
 
-示例：
-
-```json
-{
-  "webhooks": [
-    {
-      "name": "downstream-service",
-      "url": "http://downstream-service:8080/webhooks/mailbox/email",
-      "tokenEnv": "MAILBOX_DOWNSTREAM_WEBHOOK_TOKEN",
-      "filter": {
-        "providers": ["MAILBOX_PROVIDER_CLOUDFLARE", "MAILBOX_PROVIDER_OUTLOOK"],
-        "recipientDomains": ["example.invalid"],
-        "signalKinds": ["EMAIL_SIGNAL_KIND_OTP"]
-      },
-      "previewLimit": 500
-    }
-  ]
-}
-```
+邮件入库会在同一 DB transaction 写入 `mailbox_platform_event_outbox`，再由 outbox worker 发布公共 `mailbox.email.received` / `mailbox.email.signal.received` 事件，避免邮件已落库但 NATS 临时失败导致下游投影丢失。`FetchMailboxInboxes` 只创建 operation 并发布 `mailbox.inbox.fetch_requested`，由 fetch worker 异步更新 operation 投影。mailbox 注册/OAuth operation、入站 poll/fetch 和公共事件 outbox 都依赖 `PLATFORM_NATS_URL`。业务服务需要消费邮箱事件时应订阅 platform events 并在自身服务内维护幂等投影，不再通过 mailbox outbound HTTP webhook 旁路投递。
 
 ## 检查
 

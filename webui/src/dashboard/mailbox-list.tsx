@@ -10,13 +10,12 @@ import {
   RecordTop,
   StatusBadge,
   type RowActionDescriptor
-} from '@/dashboard/module-kit';
-import { WorkflowActionButton } from '@/dashboard/modules/workflow/sdk';
+} from '@byte-v-forge/common-ui';
 import { maskEmail, normalizeUiEmail } from './email-utils';
 import { authStatus, canRunMailboxAction, domainForEmail, mailboxActions, providerAction, uniqueStrings } from './mailbox-utils';
-import type { Job, Mailbox, MailboxProviderCapability } from './types';
+import type { Mailbox, MailboxOperation, MailboxProviderCapability } from './types';
 
-export function MailboxRecordList({ mailboxes, emptyText, providerCapability, showStatus, selected, busy, showSecrets, oauthing, runningWorkflowByEmail, onSelect, onOpenWorkflow, onOAuth, onDelete }: {
+export function MailboxRecordList({ mailboxes, emptyText, providerCapability, showStatus, selected, busy, showSecrets, oauthing, runningOperationByEmail, onSelect, onOAuth, onDelete }: {
   mailboxes: Mailbox[];
   emptyText: string;
   providerCapability?: MailboxProviderCapability;
@@ -25,9 +24,8 @@ export function MailboxRecordList({ mailboxes, emptyText, providerCapability, sh
   busy: boolean;
   showSecrets: boolean;
   oauthing: string;
-  runningWorkflowByEmail: Map<string, Job>;
+  runningOperationByEmail: Map<string, MailboxOperation>;
   onSelect: (mailbox: Mailbox) => void;
-  onOpenWorkflow: (job: Job) => void;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onDelete: (mailbox: Mailbox) => Promise<void>;
 }) {
@@ -43,9 +41,8 @@ export function MailboxRecordList({ mailboxes, emptyText, providerCapability, sh
           oauthing={oauthing}
           showStatus={showStatus ?? true}
           providerCapability={providerCapability}
-          currentWorkflow={runningWorkflowByEmail.get(normalizeUiEmail(mailbox.email_address))}
+          currentOperation={runningOperationByEmail.get(normalizeUiEmail(mailbox.email_address))}
           onSelect={onSelect}
-          onOpenWorkflow={onOpenWorkflow}
           onOAuth={onOAuth}
           onDelete={onDelete}
         />
@@ -65,9 +62,8 @@ export function MailboxDomainGroups(props: {
   busy: boolean;
   showSecrets: boolean;
   oauthing: string;
-  runningWorkflowByEmail: Map<string, Job>;
+  runningOperationByEmail: Map<string, MailboxOperation>;
   onSelect: (mailbox: Mailbox) => void;
-  onOpenWorkflow: (job: Job) => void;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onDelete: (mailbox: Mailbox) => Promise<void>;
 }) {
@@ -95,7 +91,7 @@ export function MailboxDomainGroups(props: {
   );
 }
 
-function MailboxCard({ mailbox, selected, busy, showSecrets, oauthing, showStatus, providerCapability, currentWorkflow, onSelect, onOpenWorkflow, onOAuth, onDelete }: {
+function MailboxCard({ mailbox, selected, busy, showSecrets, oauthing, showStatus, providerCapability, currentOperation, onSelect, onOAuth, onDelete }: {
   mailbox: Mailbox;
   selected: boolean;
   busy: boolean;
@@ -103,9 +99,8 @@ function MailboxCard({ mailbox, selected, busy, showSecrets, oauthing, showStatu
   oauthing: string;
   showStatus: boolean;
   providerCapability?: MailboxProviderCapability;
-  currentWorkflow?: Job;
+  currentOperation?: MailboxOperation;
   onSelect: (mailbox: Mailbox) => void;
-  onOpenWorkflow: (job: Job) => void;
   onOAuth: (emailAddress?: string) => Promise<void>;
   onDelete: (mailbox: Mailbox) => Promise<void>;
 }) {
@@ -123,7 +118,7 @@ function MailboxCard({ mailbox, selected, busy, showSecrets, oauthing, showStatu
     onClick: () => void onDelete(mailbox),
   }];
 
-  if (!currentWorkflow && canOAuth) {
+  if (!currentOperation && canOAuth) {
     rowActions.unshift({
       id: 'run-oauth',
       label: isOAuthing ? 'OAuth 提交中' : oauthLabel,
@@ -152,10 +147,16 @@ function MailboxCard({ mailbox, selected, busy, showSecrets, oauthing, showStatu
             </span>
           </RecordMeta>
         )}
+        {currentOperation && (
+          <RecordMeta className="grid-cols-1">
+            <span className="truncate text-xs text-muted-foreground" title={currentOperation.operation_id}>
+              操作运行中 · {currentOperation.last_step || currentOperation.action || currentOperation.status}
+            </span>
+          </RecordMeta>
+        )}
       </RecordMain>
       <RecordActions className="rowActions">
         <div className="rowActionsMain">
-          {currentWorkflow && <WorkflowActionButton job={currentWorkflow} onOpen={onOpenWorkflow} />}
           <RecordActionButtons actions={rowActions} />
         </div>
       </RecordActions>

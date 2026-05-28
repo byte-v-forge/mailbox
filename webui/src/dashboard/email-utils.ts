@@ -1,4 +1,4 @@
-import { mask } from '@/dashboard/module-kit';
+import { mask } from '@byte-v-forge/common-ui';
 
 export function maskEmail(value: string) {
   if (!value) return '-';

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/byte-v-forge/common-lib/httpx"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,12 +105,11 @@ func retryAfterFromHeaders(headers *abs.ResponseHeaders) time.Duration {
 	if headers == nil {
 		return 0
 	}
+	header := http.Header{}
 	for _, value := range headers.Get("Retry-After") {
-		if delay := retryAfter(value); delay > 0 {
-			return delay
-		}
+		header.Add("Retry-After", value)
 	}
-	return 0
+	return httpx.RetryAfterMax(header, 10*time.Second)
 }
 
 func safeErrorString(err error) (value string) {

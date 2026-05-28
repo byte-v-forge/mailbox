@@ -1,10 +1,19 @@
 import { Inbox } from 'lucide-react';
-import { Button, compactToast } from '@/dashboard/module-kit';
 import {
+  Alert,
+  AlertDescription,
+  Badge,
+  Button,
+  EmptyBlock,
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemTitle,
+  compactToast,
   formatUnix,
   mask,
   maskPreview
-} from '@/dashboard/module-kit';
+} from '@byte-v-forge/common-ui';
 import { formatEmailList, maskEmail } from './email-utils';
 import { messageSignals, signalKindName, signalLabel, verificationCodeForMessage } from './mailbox-signal-utils';
 import type { InboxMessage, InboxResult, Mailbox } from './types';
@@ -28,13 +37,17 @@ export function MailboxInboxSection({ mailbox, result, showSecrets, loading, can
           </Button>
         )}
       </div>
-      {result?.error_message && <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive">{compactToast(result.error_message)}</div>}
+      {result?.error_message && (
+        <Alert variant="destructive">
+          <AlertDescription>{compactToast(result.error_message)}</AlertDescription>
+        </Alert>
+      )}
       <div className="grid gap-2">
         {messages.map((message, index) => (
           <InboxMessageRow message={message} showSecrets={showSecrets} key={`${message.mailbox_email}-${message.id || index}`} />
         ))}
-        {!result && <InboxEmpty text={loading ? '正在读取收件箱。' : '暂无邮件。'} />}
-        {result && !result.error_message && messages.length === 0 && <InboxEmpty text="当前邮箱没有新邮件。" />}
+        {!result && <EmptyBlock text={loading ? '正在读取收件箱。' : '暂无邮件。'} />}
+        {result && !result.error_message && messages.length === 0 && <EmptyBlock text="当前邮箱没有新邮件。" />}
       </div>
     </section>
   );
@@ -45,20 +58,22 @@ function InboxMessageRow({ message, showSecrets }: {
   showSecrets: boolean;
 }) {
   return (
-    <article className="grid gap-1 rounded-lg border p-2">
-      <div className="flex items-baseline justify-between gap-2">
-        <strong className="truncate text-sm" title={message.subject}>{message.subject || '-'}</strong>
-        <span className="shrink-0 text-xs text-muted-foreground">{formatUnix(message.received_at_unix)}</span>
-      </div>
-      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span className="truncate">发件人 {showSecrets ? (message.from_address || '-') : maskEmail(message.from_address)}</span>
-        <MessageSignalStrip message={message} showSecrets={showSecrets} />
-      </div>
-      <div className="truncate text-xs text-muted-foreground" title={formatEmailList(message.recipients, true)}>
-        收件人 {formatEmailList(message.recipients, showSecrets)}
-      </div>
-      <p className="line-clamp-3 text-xs text-muted-foreground">{showSecrets ? (message.body_preview || '-') : maskPreview(message.body_preview || '-')}</p>
-    </article>
+    <Item variant="outline" className="items-start">
+      <ItemContent className="min-w-0">
+        <ItemTitle className="w-full justify-between gap-2">
+          <span className="truncate" title={message.subject}>{message.subject || '-'}</span>
+          <span className="shrink-0 text-xs font-normal text-muted-foreground">{formatUnix(message.received_at_unix)}</span>
+        </ItemTitle>
+        <ItemDescription className="flex items-center justify-between gap-2">
+          <span className="truncate">发件人 {showSecrets ? (message.from_address || '-') : maskEmail(message.from_address)}</span>
+          <MessageSignalStrip message={message} showSecrets={showSecrets} />
+        </ItemDescription>
+        <ItemDescription className="line-clamp-1" title={formatEmailList(message.recipients, true)}>
+          收件人 {formatEmailList(message.recipients, showSecrets)}
+        </ItemDescription>
+        <ItemDescription className="line-clamp-3">{showSecrets ? (message.body_preview || '-') : maskPreview(message.body_preview || '-')}</ItemDescription>
+      </ItemContent>
+    </Item>
   );
 }
 
@@ -69,7 +84,7 @@ function MessageSignalStrip({ message, showSecrets }: {
   const signals = messageSignals(message);
   const fallbackCode = verificationCodeForMessage(message);
   if (signals.length === 0 && fallbackCode) {
-    return <em className="rounded-full bg-emerald-50 px-2 py-0.5 font-mono not-italic text-emerald-700">验证码 {showSecrets ? fallbackCode : mask(fallbackCode)}</em>;
+    return <Badge variant="outline" className="border-emerald-200 bg-emerald-50 font-mono text-emerald-700">验证码 {showSecrets ? fallbackCode : mask(fallbackCode)}</Badge>;
   }
   if (signals.length === 0) return null;
   return (
@@ -78,15 +93,11 @@ function MessageSignalStrip({ message, showSecrets }: {
         const kind = signalKindName(signal.kind);
         const code = kind === 'otp' && signal.code ? ` ${showSecrets ? signal.code : mask(signal.code)}` : '';
         return (
-          <em className="rounded-full bg-muted px-2 py-0.5 not-italic" key={`${kind}-${signal.code || signal.label || index}`}>
+          <Badge variant="secondary" key={`${kind}-${signal.code || signal.label || index}`}>
             {signalLabel(signal)}{code}
-          </em>
+          </Badge>
         );
       })}
     </span>
   );
-}
-
-function InboxEmpty({ text }: { text: string }) {
-  return <div className="rounded-lg border bg-muted/30 p-4 text-center text-sm text-muted-foreground">{text}</div>;
 }

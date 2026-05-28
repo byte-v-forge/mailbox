@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/byte-v-forge/common-lib/emailx"
+	"github.com/byte-v-forge/common-lib/eventoutbox"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
+	"github.com/byte-v-forge/common-lib/hashx"
+	"github.com/byte-v-forge/common-lib/randx"
+	"github.com/byte-v-forge/common-lib/stringx"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -67,27 +72,27 @@ type inboxMessageKey struct {
 	messageKey   string
 }
 
-func (row inboxMessageRow) toProto() (*pb.EmailInboxMessage, error) {
+func (row inboxMessageRow) toProto() (*mailboxv1.EmailInboxMessage, error) {
 	return row.toProtoForProfile("")
 }
 
-func (row inboxMessageRow) toProtoForProfile(profile string) (*pb.EmailInboxMessage, error) {
+func (row inboxMessageRow) toProtoForProfile(profile string) (*mailboxv1.EmailInboxMessage, error) {
 	recipients := []string{}
 	if strings.TrimSpace(row.RecipientsJSON) != "" {
 		if err := json.Unmarshal([]byte(row.RecipientsJSON), &recipients); err != nil {
 			return nil, err
 		}
 	}
-	return emailMessageWithSignals(&pb.EmailInboxMessage{
+	return emailMessageWithSignals(&mailboxv1.EmailInboxMessage{
 		Id:                 row.ID,
-		MailboxEmail:       normalizeEmail(row.MailboxEmail),
+		MailboxEmail:       emailx.Normalize(row.MailboxEmail),
 		Subject:            row.Subject,
 		FromAddress:        row.FromAddress,
 		BodyPreview:        row.BodyPreview,
 		ReceivedAtUnix:     row.ReceivedAtUnix,
 		Recipients:         uniqueStrings(recipients),
-		Provider:           normalizeEmailProvider(row.Provider),
-		SourceMailboxEmail: normalizeEmail(row.SourceEmail),
+		ProviderKey:        normalizeEmailProvider(row.Provider),
+		SourceMailboxEmail: emailx.Normalize(row.SourceEmail),
 		BodyText:           row.BodyText,
 		HtmlBody:           row.HTMLBody,
 		RawSize:            row.RawSize,
@@ -99,10 +104,11 @@ type rowScanner interface {
 }
 
 type MailboxStore struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	recent *recentEmailCache
 }
 
-func NewMailboxStore(ctx context.Context, dsn string) (*MailboxStore, error) {
+func NewMailboxStore(ctx context.Context, dsn string, recent *recentEmailCache) (*MailboxStore, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, errors.New("PG_DSN is required")
 	}
@@ -110,7 +116,7 @@ func NewMailboxStore(ctx context.Context, dsn string) (*MailboxStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := &MailboxStore{pool: pool}
+	store := &MailboxStore{pool: pool, recent: recent}
 	if err := store.ensureSchema(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -214,6 +220,11 @@ func (s *MailboxStore) ensureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_mailbox_inbox_messages_received_at ON mailbox_inbox_messages(mailbox_email, received_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_mailbox_inbox_messages_provider_received_at ON mailbox_inbox_messages(provider, mailbox_email, received_at DESC)`,
 	}
+	outboxStatements, err := eventoutbox.PostgresSchemaStatements(mailboxPlatformEventOutboxTable, "idx_mailbox_platform_event_outbox_pending")
+	if err != nil {
+		return err
+	}
+	statements = append(statements, outboxStatements...)
 	statements = insertSchemaStatementsAfter(statements, "ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS last_inbox_received_at_ns", mailboxProviderSchemaStatements())
 	statements = insertSchemaStatementsAfter(statements, "ALTER TABLE mailboxes DROP COLUMN IF EXISTS assigned_account_id", mailboxProviderLegacyStatements())
 	for _, statement := range statements {
@@ -244,16 +255,16 @@ func (s *MailboxStore) UpsertMailbox(ctx context.Context, mailbox *pb.EmailMailb
 	if mailbox == nil {
 		return nil, errors.New("mailbox is required")
 	}
-	email := normalizeEmail(mailbox.GetEmailAddress())
+	email := emailx.Normalize(mailbox.GetEmailAddress())
 	if email == "" {
 		return nil, errors.New("email_address is required")
 	}
-	requestedProvider := normalizeEmailProvider(mailbox.GetProvider())
+	requestedProvider := normalizeEmailProvider(mailbox.GetProviderKey())
 	insertProvider := requestedProvider
 	if insertProvider == "" {
 		insertProvider = defaultMailboxProvider()
 	}
-	rowID, err := randomHex(16)
+	rowID, err := randx.Hex(16)
 	if err != nil {
 		return nil, err
 	}
@@ -379,20 +390,20 @@ func (s *MailboxStore) ListOAuthMailboxes(ctx context.Context, limit int32) ([]*
 }
 
 func (s *MailboxStore) InboxWatermark(ctx context.Context, email string) (int64, error) {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	if email == "" {
 		return 0, errors.New("email_address is required")
 	}
 	var watermark int64
 	err := s.pool.QueryRow(ctx, "SELECT last_inbox_received_at_ns FROM mailboxes WHERE email = $1", email).Scan(&watermark)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("mailbox not found: %s", redactEmail(email))
+		return 0, fmt.Errorf("mailbox not found: %s", emailx.Redact(email))
 	}
 	return watermark, err
 }
 
 func (s *MailboxStore) HasInboxMessages(ctx context.Context, email string) (bool, error) {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	if email == "" {
 		return false, errors.New("email_address is required")
 	}
@@ -405,11 +416,11 @@ func (s *MailboxStore) HasInboxMessages(ctx context.Context, email string) (bool
 	return exists, err
 }
 
-func (s *MailboxStore) RecordInboundEmail(ctx context.Context, event *pb.InboundEmailWebhook) ([]*pb.EmailInboxMessage, error) {
+func (s *MailboxStore) RecordInboundEmail(ctx context.Context, event *pb.InboundEmailWebhook) ([]*mailboxv1.EmailInboxMessage, error) {
 	if event == nil {
 		return nil, errors.New("email event is required")
 	}
-	provider := normalizeEmailProvider(event.GetProvider())
+	provider := normalizeEmailProvider(event.GetProviderKey())
 	if provider == "" {
 		return nil, errors.New("email event provider is required")
 	}
@@ -435,23 +446,23 @@ func (s *MailboxStore) RecordInboundEmail(ctx context.Context, event *pb.Inbound
 	now := time.Now().Unix()
 	touchedMailboxes := map[string]struct{}{}
 	touchedDomains := map[string]struct{}{}
-	unseen := make([]*pb.EmailInboxMessage, 0, len(recipients))
+	unseen := make([]*mailboxv1.EmailInboxMessage, 0, len(recipients))
 	for _, recipient := range recipients {
 		touchedMailboxes[recipient] = struct{}{}
 		if domain := domainForEmail(recipient); domain != "" {
 			touchedDomains[domain] = struct{}{}
 		}
-		key := stableMessageKey(provider, recipient, firstNonEmpty(event.GetEventId(), event.GetMessageId(), event.GetSubject()))
-		messageID := firstNonEmpty(event.GetMessageId(), event.GetEventId(), key)
-		persisted := &pb.EmailInboxMessage{
+		key := stableMessageKey(provider, recipient, stringx.FirstNonEmpty(event.GetEventId(), event.GetMessageId(), event.GetSubject()))
+		messageID := stringx.FirstNonEmpty(event.GetMessageId(), event.GetEventId(), key)
+		persisted := &mailboxv1.EmailInboxMessage{
 			Id:                 messageID,
 			MailboxEmail:       recipient,
 			Subject:            strings.TrimSpace(event.GetSubject()),
-			FromAddress:        normalizeEmail(event.GetFromAddress()),
+			FromAddress:        emailx.Normalize(event.GetFromAddress()),
 			BodyPreview:        compactMessageText(body, 500),
 			ReceivedAtUnix:     receivedAt,
 			Recipients:         recipients,
-			Provider:           provider,
+			ProviderKey:        provider,
 			SourceMailboxEmail: recipient,
 			BodyText:           body,
 			HtmlBody:           strings.TrimSpace(event.GetHtmlBody()),
@@ -462,7 +473,7 @@ func (s *MailboxStore) RecordInboundEmail(ctx context.Context, event *pb.Inbound
 			id:             messageID,
 			mailboxEmail:   recipient,
 			subject:        strings.TrimSpace(event.GetSubject()),
-			fromAddress:    normalizeEmail(event.GetFromAddress()),
+			fromAddress:    emailx.Normalize(event.GetFromAddress()),
 			bodyPreview:    compactMessageText(body, 500),
 			receivedAtUnix: receivedAt,
 			recipients:     recipients,
@@ -492,9 +503,13 @@ func (s *MailboxStore) RecordInboundEmail(ctx context.Context, event *pb.Inbound
 	}); err != nil {
 		return nil, err
 	}
+	if err := s.enqueueInboxOutboxEvents(ctx, tx, unseen); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	s.recordRecentInboxMessages(ctx, unseen)
 	return unseen, nil
 }
 
@@ -523,16 +538,16 @@ func insertInboxMessage(ctx context.Context, tx pgx.Tx, msg inboxPersistMessage,
 			recipients_json = EXCLUDED.recipients_json,
 			source_mailbox_email = EXCLUDED.source_mailbox_email,
 			updated_at = EXCLUDED.updated_at
-	`, normalizeEmailProvider(msg.provider), normalizeEmail(msg.mailboxEmail), msg.key, strings.TrimSpace(msg.id),
-		strings.TrimSpace(msg.subject), normalizeEmail(msg.fromAddress), strings.TrimSpace(msg.bodyPreview),
+	`, normalizeEmailProvider(msg.provider), emailx.Normalize(msg.mailboxEmail), msg.key, strings.TrimSpace(msg.id),
+		strings.TrimSpace(msg.subject), emailx.Normalize(msg.fromAddress), strings.TrimSpace(msg.bodyPreview),
 		strings.TrimSpace(msg.bodyText), strings.TrimSpace(msg.htmlBody), msg.rawSize, msg.receivedAtUnix,
-		string(recipientsJSON), normalizeEmail(msg.sourceEmail), now)
+		string(recipientsJSON), emailx.Normalize(msg.sourceEmail), now)
 	return err
 }
 
 func pruneMailboxMessages(ctx context.Context, tx pgx.Tx, provider string, mailboxEmail string, limit int) error {
 	provider = normalizeEmailProvider(provider)
-	mailboxEmail = normalizeEmail(mailboxEmail)
+	mailboxEmail = emailx.Normalize(mailboxEmail)
 	if provider == "" || mailboxEmail == "" || limit <= 0 {
 		return nil
 	}
@@ -618,21 +633,21 @@ func deleteInboxKeys(ctx context.Context, tx pgx.Tx, keys []inboxMessageKey) err
 }
 
 func messageMailboxEmails(accountEmail string, recipients []string) []string {
-	items := []string{normalizeEmail(accountEmail)}
+	items := []string{emailx.Normalize(accountEmail)}
 	for _, recipient := range recipients {
-		if email := normalizeEmail(recipient); email != "" {
+		if email := emailx.Normalize(recipient); email != "" {
 			items = append(items, email)
 		}
 	}
 	return uniqueStrings(items)
 }
 
-func (s *MailboxStore) ListInboxMessages(ctx context.Context, email string, limit int32) ([]*pb.EmailInboxMessage, error) {
+func (s *MailboxStore) ListInboxMessages(ctx context.Context, email string, limit int32) ([]*mailboxv1.EmailInboxMessage, error) {
 	return s.ListInboxMessagesSince(ctx, email, limit, 0)
 }
 
-func (s *MailboxStore) ListInboxMessagesSince(ctx context.Context, email string, limit int32, receivedAfterUnix int64) ([]*pb.EmailInboxMessage, error) {
-	email = normalizeEmail(email)
+func (s *MailboxStore) ListInboxMessagesSince(ctx context.Context, email string, limit int32, receivedAfterUnix int64) ([]*mailboxv1.EmailInboxMessage, error) {
+	email = emailx.Normalize(email)
 	if email == "" {
 		return nil, errors.New("email_address is required")
 	}
@@ -660,7 +675,7 @@ func (s *MailboxStore) ListInboxMessagesSince(ctx context.Context, email string,
 	}
 	defer rows.Close()
 
-	out := []*pb.EmailInboxMessage{}
+	out := []*mailboxv1.EmailInboxMessage{}
 	for rows.Next() {
 		var row inboxMessageRow
 		if err := rows.Scan(
@@ -683,16 +698,16 @@ func (s *MailboxStore) ListInboxMessagesSince(ctx context.Context, email string,
 		if err := json.Unmarshal([]byte(row.RecipientsJSON), &recipients); err != nil {
 			recipients = []string{}
 		}
-		out = append(out, emailMessageWithSignals(&pb.EmailInboxMessage{
+		out = append(out, emailMessageWithSignals(&mailboxv1.EmailInboxMessage{
 			Id:                 row.ID,
-			MailboxEmail:       normalizeEmail(row.MailboxEmail),
+			MailboxEmail:       emailx.Normalize(row.MailboxEmail),
 			Subject:            row.Subject,
 			FromAddress:        row.FromAddress,
 			BodyPreview:        row.BodyPreview,
 			ReceivedAtUnix:     row.ReceivedAtUnix,
 			Recipients:         uniqueStrings(recipients),
-			Provider:           normalizeEmailProvider(row.Provider),
-			SourceMailboxEmail: normalizeEmail(row.SourceEmail),
+			ProviderKey:        normalizeEmailProvider(row.Provider),
+			SourceMailboxEmail: emailx.Normalize(row.SourceEmail),
 			BodyText:           row.BodyText,
 			HtmlBody:           row.HTMLBody,
 			RawSize:            row.RawSize,
@@ -701,12 +716,23 @@ func (s *MailboxStore) ListInboxMessagesSince(ctx context.Context, email string,
 	return out, rows.Err()
 }
 
-func (s *MailboxStore) LatestMessage(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64) (*pb.EmailInboxMessage, bool, error) {
-	return s.LatestMessageWithSignal(ctx, email, subjectKeyword, issuedAfterUnix, "", pb.EmailSignalKind_EMAIL_SIGNAL_KIND_UNSPECIFIED)
+func (s *MailboxStore) LatestMessage(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64) (*mailboxv1.EmailInboxMessage, bool, error) {
+	return s.LatestMessageWithSignal(ctx, email, subjectKeyword, issuedAfterUnix, "", mailboxv1.EmailSignalKind_EMAIL_SIGNAL_KIND_UNSPECIFIED)
 }
 
-func (s *MailboxStore) LatestMessageWithSignal(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64, parserProfile string, signalKind pb.EmailSignalKind) (*pb.EmailInboxMessage, bool, error) {
-	for _, candidate := range uniqueStrings([]string{email, canonicalEmail(email)}) {
+func (s *MailboxStore) LatestMessageWithSignal(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64, parserProfile string, signalKind mailboxv1.EmailSignalKind) (*mailboxv1.EmailInboxMessage, bool, error) {
+	candidates := uniqueStrings([]string{email, emailx.CanonicalPlusAlias(email)})
+	for _, candidate := range candidates {
+		msg, ok, err := s.latestCachedMessage(ctx, candidate, subjectKeyword, issuedAfterUnix, parserProfile, signalKind)
+		if err != nil {
+			logWarning("latest mailbox email cache read failed email=%s: %v", emailx.Redact(candidate), err)
+			break
+		}
+		if ok {
+			return msg, true, nil
+		}
+	}
+	for _, candidate := range candidates {
 		msg, ok, err := s.latestMessageForMailbox(ctx, candidate, subjectKeyword, issuedAfterUnix, parserProfile, signalKind)
 		if err != nil || ok {
 			return msg, ok, err
@@ -715,8 +741,26 @@ func (s *MailboxStore) LatestMessageWithSignal(ctx context.Context, email string
 	return nil, false, nil
 }
 
-func (s *MailboxStore) latestMessageForMailbox(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64, parserProfile string, signalKind pb.EmailSignalKind) (*pb.EmailInboxMessage, bool, error) {
-	email = normalizeEmail(email)
+func (s *MailboxStore) latestCachedMessage(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64, parserProfile string, signalKind mailboxv1.EmailSignalKind) (*mailboxv1.EmailInboxMessage, bool, error) {
+	if s == nil || s.recent == nil {
+		return nil, false, nil
+	}
+	return s.recent.Latest(ctx, email, subjectKeyword, issuedAfterUnix, parserProfile, signalKind)
+}
+
+func (s *MailboxStore) recordRecentInboxMessages(ctx context.Context, messages []*mailboxv1.EmailInboxMessage) {
+	if s == nil || s.recent == nil || len(messages) == 0 {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := s.recent.Record(cacheCtx, messages); err != nil {
+		logWarning("record recent mailbox email cache failed: %v", err)
+	}
+}
+
+func (s *MailboxStore) latestMessageForMailbox(ctx context.Context, email string, subjectKeyword string, issuedAfterUnix int64, parserProfile string, signalKind mailboxv1.EmailSignalKind) (*mailboxv1.EmailInboxMessage, bool, error) {
+	email = emailx.Normalize(email)
 	if email == "" {
 		return nil, false, nil
 	}
@@ -775,7 +819,7 @@ func (s *MailboxStore) latestMessageForMailbox(ctx context.Context, email string
 }
 
 func (s *MailboxStore) MarkEmailAuthStatus(ctx context.Context, email string, authStatus string, lastError string) (*pb.EmailMailbox, error) {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	authStatus = strings.TrimSpace(authStatus)
 	if email == "" {
 		return nil, errors.New("email_address is required")
@@ -791,7 +835,7 @@ func (s *MailboxStore) MarkEmailAuthStatus(ctx context.Context, email string, au
 
 	row, err := scanMailbox(tx.QueryRow(ctx, mailboxSelectSQL()+" WHERE m.email = $1 FOR UPDATE", email))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("mailbox not found: %s", redactEmail(email))
+		return nil, fmt.Errorf("mailbox not found: %s", emailx.Redact(email))
 	}
 	if err != nil {
 		return nil, err
@@ -810,7 +854,7 @@ func (s *MailboxStore) MarkEmailAuthStatus(ctx context.Context, email string, au
 }
 
 func (s *MailboxStore) DeleteMailbox(ctx context.Context, email string) (bool, error) {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	if email == "" {
 		return false, errors.New("email_address is required")
 	}
@@ -874,9 +918,9 @@ func sqlInArgs(values []string) ([]any, string) {
 }
 
 func (s *MailboxStore) FindMailbox(ctx context.Context, email string) (*pb.EmailMailbox, error) {
-	row, err := scanMailbox(s.pool.QueryRow(ctx, mailboxSelectSQL()+" WHERE m.email = $1", normalizeEmail(email)))
+	row, err := scanMailbox(s.pool.QueryRow(ctx, mailboxSelectSQL()+" WHERE m.email = $1", emailx.Normalize(email)))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("mailbox not found: %s", redactEmail(email))
+		return nil, fmt.Errorf("mailbox not found: %s", emailx.Redact(email))
 	}
 	if err != nil {
 		return nil, err
@@ -886,16 +930,16 @@ func (s *MailboxStore) FindMailbox(ctx context.Context, email string) (*pb.Email
 }
 
 func (s *MailboxStore) PollMailboxForEmail(ctx context.Context, email string) (*pb.EmailMailbox, error) {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	row, err := scanMailbox(s.pool.QueryRow(ctx, mailboxSelectSQL()+" WHERE m.email = $1", email))
 	if errors.Is(err, pgx.ErrNoRows) {
-		canonical := canonicalEmail(email)
+		canonical := emailx.CanonicalPlusAlias(email)
 		if canonical != "" && canonical != email {
 			row, err = scanMailbox(s.pool.QueryRow(ctx, mailboxSelectSQL()+" WHERE m.email = $1", canonical))
 		}
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("mailbox not found: %s", redactEmail(email))
+		return nil, fmt.Errorf("mailbox not found: %s", emailx.Redact(email))
 	}
 	if err != nil {
 		return nil, err
@@ -908,7 +952,7 @@ func (s *MailboxStore) PollMailboxForEmail(ctx context.Context, email string) (*
 }
 
 func (s *MailboxStore) UpdateMailboxTokens(ctx context.Context, email string, refreshToken string, accessToken string) error {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	row, err := scanMailbox(s.pool.QueryRow(ctx, mailboxSelectSQL()+" WHERE m.email = $1", email))
 	if err != nil {
 		return err
@@ -922,7 +966,7 @@ func (s *MailboxStore) UpdateMailboxTokens(ctx context.Context, email string, re
 
 func (s *MailboxStore) MarkAuthFailed(ctx context.Context, email string, err error) {
 	if _, updateErr := s.MarkEmailAuthStatus(ctx, email, authStatusAuthFailed, err.Error()); updateErr != nil {
-		logWarning("failed to mark mailbox auth failed for %s: %v", redactEmail(email), updateErr)
+		logWarning("failed to mark mailbox auth failed for %s: %v", emailx.Redact(email), updateErr)
 	}
 }
 
@@ -952,7 +996,7 @@ func (m *mailboxRow) toProto() *pb.EmailMailbox {
 	}
 	mailbox := &pb.EmailMailbox{
 		EmailAddress: m.Email,
-		Provider:     normalizeEmailProvider(m.Provider),
+		ProviderKey:  normalizeEmailProvider(m.Provider),
 		Password:     m.Password,
 		RefreshToken: m.RefreshToken,
 		AccessToken:  m.AccessToken,
@@ -971,7 +1015,7 @@ func normalizeEmailProvider(provider string) string {
 }
 
 func domainForEmail(email string) string {
-	_, domain, ok := strings.Cut(normalizeEmail(email), "@")
+	_, domain, ok := strings.Cut(emailx.Normalize(email), "@")
 	if !ok {
 		return ""
 	}
@@ -979,20 +1023,5 @@ func domainForEmail(email string) string {
 }
 
 func stableMessageKey(provider string, mailboxEmail string, value string) string {
-	raw := strings.Join([]string{
-		normalizeEmailProvider(provider),
-		normalizeEmail(mailboxEmail),
-		strings.TrimSpace(value),
-	}, "\x00")
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+	return hashx.StableParts(normalizeEmailProvider(provider), emailx.Normalize(mailboxEmail), strings.TrimSpace(value))
 }

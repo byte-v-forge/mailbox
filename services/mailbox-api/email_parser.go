@@ -2,152 +2,78 @@ package main
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 
-	"mailboxapi/pb"
-)
-
-const (
-	emailParserProfileGeneric = "generic"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
 )
 
 var (
-	verificationCodePattern = regexp.MustCompile(`(?i)(?:verification|security|login|one[- ]?time|otp|code|验证码|安全代码)[^0-9]{0,80}([0-9]{4,8})`)
-	standaloneCodePattern   = regexp.MustCompile(`(^|[^0-9])([0-9]{6})([^0-9]|$)`)
+	emailOTPContextPattern    = regexp.MustCompile(`(?i)(?:verification|security|login|one[- ]?time|otp|code|验证码|安全代码)[^0-9]{0,80}([0-9]{4,8})`)
+	emailOTPStandalonePattern = regexp.MustCompile(`(^|[^0-9])([0-9]{6})([^0-9]|$)`)
 )
 
-func emailMessageWithSignals(message *pb.EmailInboxMessage, profile string) *pb.EmailInboxMessage {
+func emailMessageWithSignals(message *mailboxv1.EmailInboxMessage, _ string) *mailboxv1.EmailInboxMessage {
 	if message == nil {
 		return nil
 	}
-	message.Signals = parseEmailSignals(message, profile)
-	message.PrimarySignal = primaryEmailSignal(message.Signals)
+	code, evidence := extractEmailOTP(message)
+	if code == "" {
+		message.Signals = nil
+		message.PrimarySignal = nil
+		return message
+	}
+	signal := &mailboxv1.EmailSignal{
+		Kind:       mailboxv1.EmailSignalKind_EMAIL_SIGNAL_KIND_OTP,
+		Code:       normalizeEmailOTP(code),
+		Label:      "verification_code",
+		Profile:    "generic",
+		Parser:     "mailbox-email-otp",
+		Confidence: 70,
+		Evidence:   evidence,
+	}
+	message.Signals = []*mailboxv1.EmailSignal{signal}
+	message.PrimarySignal = signal
 	return message
 }
 
-func parseEmailSignals(message *pb.EmailInboxMessage, profile string) []*pb.EmailSignal {
+func messageHasSignal(message *mailboxv1.EmailInboxMessage, kind mailboxv1.EmailSignalKind) bool {
 	if message == nil {
-		return nil
+		return false
 	}
-	return dedupeEmailSignals(parseGenericEmailSignals(message, normalizeParserProfile(profile)))
-}
-
-func parseGenericEmailSignals(message *pb.EmailInboxMessage, profile string) []*pb.EmailSignal {
-	text := emailSignalText(message)
-	code, evidence := extractVerificationCode(text)
-	if code == "" {
-		return nil
+	if kind == mailboxv1.EmailSignalKind_EMAIL_SIGNAL_KIND_UNSPECIFIED {
+		return true
 	}
-	return []*pb.EmailSignal{{
-		Kind:       pb.EmailSignalKind_EMAIL_SIGNAL_KIND_OTP,
-		Code:       code,
-		Label:      "验证码",
-		Profile:    profile,
-		Parser:     "generic-verification-code",
-		Confidence: 70,
-		Evidence:   evidence,
-	}}
-}
-
-func extractVerificationCode(text string) (string, string) {
-	if match := verificationCodePattern.FindStringSubmatch(text); len(match) >= 2 {
-		return match[1], compactMessageText(match[0], 120)
-	}
-	if match := standaloneCodePattern.FindStringSubmatch(text); len(match) >= 3 {
-		return match[2], strings.TrimSpace(match[0])
-	}
-	return "", ""
-}
-
-func emailSignalText(message *pb.EmailInboxMessage) string {
-	return strings.Join([]string{
-		message.GetSubject(),
-		message.GetFromAddress(),
-		message.GetBodyPreview(),
-		message.GetBodyText(),
-		compactMessageText(message.GetHtmlBody(), 5000),
-	}, "\n")
-}
-
-func primaryEmailSignal(signals []*pb.EmailSignal) *pb.EmailSignal {
-	if len(signals) == 0 {
-		return nil
-	}
-	sorted := append([]*pb.EmailSignal{}, signals...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].GetKind() != sorted[j].GetKind() {
-			return signalPriority(sorted[i].GetKind()) < signalPriority(sorted[j].GetKind())
-		}
-		return sorted[i].GetConfidence() > sorted[j].GetConfidence()
-	})
-	return sorted[0]
-}
-
-func signalPriority(kind pb.EmailSignalKind) int {
-	switch kind {
-	case pb.EmailSignalKind_EMAIL_SIGNAL_KIND_OTP:
-		return 0
-	default:
-		return 9
-	}
-}
-
-func messageHasSignal(message *pb.EmailInboxMessage, kind pb.EmailSignalKind) bool {
-	if kind == pb.EmailSignalKind_EMAIL_SIGNAL_KIND_UNSPECIFIED {
+	if signal := message.GetPrimarySignal(); signal.GetKind() == kind && signal.GetCode() != "" {
 		return true
 	}
 	for _, signal := range message.GetSignals() {
-		if signal.GetKind() == kind {
+		if signal.GetKind() == kind && signal.GetCode() != "" {
 			return true
 		}
 	}
 	return false
 }
 
-func firstSignalCode(message *pb.EmailInboxMessage, kind pb.EmailSignalKind) string {
+func extractEmailOTP(message *mailboxv1.EmailInboxMessage) (string, string) {
 	if message == nil {
-		return ""
+		return "", ""
 	}
-	if signal := message.GetPrimarySignal(); signal.GetKind() == kind && signal.GetCode() != "" {
-		return signal.GetCode()
+	text := strings.Join([]string{
+		message.GetSubject(),
+		message.GetFromAddress(),
+		message.GetBodyPreview(),
+		message.GetBodyText(),
+		message.GetHtmlBody(),
+	}, "\n")
+	if match := emailOTPContextPattern.FindStringSubmatch(text); len(match) >= 2 {
+		return normalizeEmailOTP(match[1]), strings.TrimSpace(match[0])
 	}
-	for _, signal := range message.GetSignals() {
-		if signal.GetKind() == kind && signal.GetCode() != "" {
-			return signal.GetCode()
-		}
+	if match := emailOTPStandalonePattern.FindStringSubmatch(text); len(match) >= 3 {
+		return normalizeEmailOTP(match[2]), strings.TrimSpace(match[0])
 	}
-	return ""
+	return "", ""
 }
 
-func dedupeEmailSignals(signals []*pb.EmailSignal) []*pb.EmailSignal {
-	best := map[string]*pb.EmailSignal{}
-	for _, signal := range signals {
-		if signal == nil || signal.GetKind() == pb.EmailSignalKind_EMAIL_SIGNAL_KIND_UNSPECIFIED {
-			continue
-		}
-		key := strings.Join([]string{
-			signal.GetKind().String(),
-			strings.TrimSpace(signal.GetCode()),
-			strings.TrimSpace(signal.GetLabel()),
-		}, "\x00")
-		if existing, ok := best[key]; !ok || signal.GetConfidence() > existing.GetConfidence() {
-			best[key] = signal
-		}
-	}
-	out := make([]*pb.EmailSignal, 0, len(best))
-	for _, signal := range best {
-		out = append(out, signal)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].GetKind() != out[j].GetKind() {
-			return signalPriority(out[i].GetKind()) < signalPriority(out[j].GetKind())
-		}
-		return out[i].GetConfidence() > out[j].GetConfidence()
-	})
-	return out
-}
-
-func normalizeParserProfile(profile string) string {
-	return emailParserProfileGeneric
+func normalizeEmailOTP(value string) string {
+	return strings.TrimSpace(strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "", "-", "").Replace(value))
 }

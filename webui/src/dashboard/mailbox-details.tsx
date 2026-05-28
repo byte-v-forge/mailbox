@@ -2,17 +2,15 @@ import { useEffect, useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import {
   ActionButtonGroup,
+  Card,
+  ContentTabs,
   KVList,
-  StatusBadge,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger
-} from '@/dashboard/module-kit';
-import type { ActionButtonDescriptor, KVDescriptor } from '@/dashboard/module-kit';
+  StatusBadge
+} from '@byte-v-forge/common-ui';
+import type { ActionButtonDescriptor, KVDescriptor } from '@byte-v-forge/common-ui';
 import {
   mask,
-} from '@/dashboard/module-kit';
+} from '@byte-v-forge/common-ui';
 import { maskEmail } from './email-utils';
 import { mailboxStatusText } from './labels';
 import { MailboxInboxSection } from './mailbox-inbox';
@@ -46,18 +44,27 @@ export function MailboxDetails({ mailbox, showSecrets, inboxResult, inboxLoading
   }, [mailbox.email_address]);
 
   return (
-    <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'overview' | 'inbox')} className="min-h-0 flex-1 overflow-hidden">
-      <TabsList variant="line" className="w-full">
-        <TabsTrigger value="overview">概览</TabsTrigger>
-        <TabsTrigger value="inbox">收件箱 {inboxMessageCount}</TabsTrigger>
-      </TabsList>
-      <TabsContent value="overview" className="mt-0 min-h-0 overflow-auto">
-        <MailboxOverview mailbox={mailbox} showSecrets={showSecrets} latestOtp={latestOtp} onCopy={onCopy} onDelete={onDelete} />
-      </TabsContent>
-      <TabsContent value="inbox" className="mt-0 min-h-0 overflow-auto">
-        <MailboxInboxSection mailbox={mailbox} result={inboxResult} showSecrets={showSecrets} loading={inboxLoading} canFetch={canFetchInbox} onFetch={onFetchInbox} />
-      </TabsContent>
-    </Tabs>
+    <ContentTabs
+      value={activeTab}
+      onValueChange={(value) => setActiveTab(value as 'overview' | 'inbox')}
+      tabsClassName="min-h-0 flex-1 overflow-hidden"
+      tabsListVariant="line"
+      tabsListClassName="w-full"
+      tabs={[
+        {
+          value: 'overview',
+          label: '概览',
+          contentClassName: 'overflow-auto',
+          content: <MailboxOverview mailbox={mailbox} showSecrets={showSecrets} latestOtp={latestOtp} onCopy={onCopy} onDelete={onDelete} />
+        },
+        {
+          value: 'inbox',
+          label: `收件箱 ${inboxMessageCount}`,
+          contentClassName: 'overflow-auto',
+          content: <MailboxInboxSection mailbox={mailbox} result={inboxResult} showSecrets={showSecrets} loading={inboxLoading} canFetch={canFetchInbox} onFetch={onFetchInbox} />
+        }
+      ]}
+    />
   );
 }
 
@@ -68,7 +75,7 @@ function MailboxOverview({ mailbox, showSecrets, latestOtp, onCopy, onDelete }: 
   onCopy: (label: string, value: string) => void;
   onDelete: (mailbox: Mailbox) => Promise<void>;
 }) {
-  const providerConfig = mailboxProviderConfig(mailbox.provider);
+  const providerConfig = mailboxProviderConfig(mailbox.provider_key);
   const fields: KVDescriptor[] = [{
     id: 'email',
     label: '邮箱',
@@ -129,7 +136,7 @@ function MailboxOverview({ mailbox, showSecrets, latestOtp, onCopy, onDelete }: 
 
   return (
     <section className="grid gap-3">
-      <div className="grid gap-2 rounded-lg border p-3">
+      <Card className="grid gap-2 p-3 shadow-none">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <strong className="block truncate text-sm">{showSecrets ? mailbox.email_address : maskEmail(mailbox.email_address)}</strong>
@@ -137,7 +144,7 @@ function MailboxOverview({ mailbox, showSecrets, latestOtp, onCopy, onDelete }: 
           {providerConfig.showStatus && <StatusBadge status={authStatus(mailbox)} />}
         </div>
         <MailboxOtpPanel latestOtp={latestOtp} showSecrets={showSecrets} loading={false} onCopy={onCopy} />
-      </div>
+      </Card>
       <div>
         <KVList items={fields} onCopy={onCopy} />
       </div>

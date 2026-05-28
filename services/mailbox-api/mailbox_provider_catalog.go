@@ -6,10 +6,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/byte-v-forge/common-lib/emailx"
+	browserautomationv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/browserautomation/v1"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	browserautomationv1 "github.com/byte-v-forge/browser-automation/gen/go/byte/v/forge/contracts/browserautomation/v1"
 
 	"mailboxapi/pb"
 )
@@ -27,15 +28,14 @@ type mailboxProviderDomainStore struct {
 type mailboxProviderPlugin struct {
 	key               string
 	aliases           []string
-	provider          pb.MailboxProvider
 	displayName       string
 	storedInboxOnly   bool
 	schemaStatements  func() []string
 	selectJoin        string
 	selectFields      mailboxProviderSelectFields
-	capabilities      func() *pb.MailboxProviderCapabilities
+	capabilities      func() *mailboxv1.MailboxProviderCapabilities
 	loadDomains       func() []string
-	domains           func([]string) []*pb.MailboxDomain
+	domains           func([]string) []*mailboxv1.MailboxDomain
 	matchesAddress    func(string, mailboxProviderRuntimeConfig) bool
 	upsert            func(context.Context, pgx.Tx, *pb.EmailMailbox, int64) error
 	authFilter        func(string, *[]any) string
@@ -100,27 +100,29 @@ func (s *mailboxProviderDomainStore) set(provider string, domains []string) {
 	s.byProvider[normalizeMailboxProviderInput(provider)] = append([]string{}, domains...)
 }
 
-func (c mailboxProviderRuntimeConfig) ListDomains(req *pb.ListMailboxDomainsRequest) *pb.ListMailboxDomainsResponse {
-	provider := providerByEnum(req.GetProvider())
-	if req.GetProvider() != pb.MailboxProvider_MAILBOX_PROVIDER_UNSPECIFIED {
+func (c mailboxProviderRuntimeConfig) ListDomains(req *mailboxv1.ListMailboxDomainsRequest) *mailboxv1.ListMailboxDomainsResponse {
+	providerKey := normalizeMailboxProviderInput(req.GetProviderKey())
+	provider := providerByKey(providerKey)
+	if providerKey != "" {
 		if provider == nil || provider.domains == nil {
-			return &pb.ListMailboxDomainsResponse{Domains: []*pb.MailboxDomain{}}
+			return &mailboxv1.ListMailboxDomainsResponse{Domains: []*mailboxv1.MailboxDomain{}}
 		}
-		return &pb.ListMailboxDomainsResponse{Domains: provider.domains(c.domainsForProvider(provider.key))}
+		return &mailboxv1.ListMailboxDomainsResponse{Domains: provider.domains(c.domainsForProvider(provider.key))}
 	}
-	domains := []*pb.MailboxDomain{}
+	domains := []*mailboxv1.MailboxDomain{}
 	for _, provider := range mailboxProviderPlugins() {
 		if provider.domains != nil {
 			domains = append(domains, provider.domains(c.domainsForProvider(provider.key))...)
 		}
 	}
-	return &pb.ListMailboxDomainsResponse{Domains: domains}
+	return &mailboxv1.ListMailboxDomainsResponse{Domains: domains}
 }
 
-func (c mailboxProviderRuntimeConfig) SyncDomains(req *pb.SyncMailboxDomainsRequest) *pb.SyncMailboxDomainsResponse {
-	provider := providerByEnum(req.GetProvider())
-	if req.GetProvider() != pb.MailboxProvider_MAILBOX_PROVIDER_UNSPECIFIED && provider == nil {
-		return &pb.SyncMailboxDomainsResponse{ErrorMessage: "provider cannot sync domains"}
+func (c mailboxProviderRuntimeConfig) SyncDomains(req *mailboxv1.SyncMailboxDomainsRequest) *mailboxv1.SyncMailboxDomainsResponse {
+	providerKey := normalizeMailboxProviderInput(req.GetProviderKey())
+	provider := providerByKey(providerKey)
+	if providerKey != "" && provider == nil {
+		return &mailboxv1.SyncMailboxDomainsResponse{ErrorMessage: "provider cannot sync domains"}
 	}
 	providers := mailboxProviderPlugins()
 	if provider != nil {
@@ -132,25 +134,26 @@ func (c mailboxProviderRuntimeConfig) SyncDomains(req *pb.SyncMailboxDomainsRequ
 		}
 		c.domainStore.set(candidate.key, candidate.loadDomains())
 	}
-	domains := c.ListDomains(&pb.ListMailboxDomainsRequest{Provider: req.GetProvider()}).GetDomains()
-	return &pb.SyncMailboxDomainsResponse{Domains: domains, SyncedCount: int32(len(domains))}
+	domains := c.ListDomains(&mailboxv1.ListMailboxDomainsRequest{ProviderKey: providerKey}).GetDomains()
+	return &mailboxv1.SyncMailboxDomainsResponse{Domains: domains, SyncedCount: int32(len(domains))}
 }
 
-func (c mailboxProviderRuntimeConfig) ListCapabilities(req *pb.ListMailboxProviderCapabilitiesRequest) *pb.ListMailboxProviderCapabilitiesResponse {
-	providers := []*pb.MailboxProviderCapabilities{}
+func (c mailboxProviderRuntimeConfig) ListCapabilities(req *mailboxv1.ListMailboxProviderCapabilitiesRequest) *mailboxv1.ListMailboxProviderCapabilitiesResponse {
+	providers := []*mailboxv1.MailboxProviderCapabilities{}
+	providerKey := normalizeMailboxProviderInput(req.GetProviderKey())
 	for _, provider := range mailboxProviderPlugins() {
-		if req.GetProvider() != pb.MailboxProvider_MAILBOX_PROVIDER_UNSPECIFIED && req.GetProvider() != provider.provider {
+		if providerKey != "" && providerKey != provider.key {
 			continue
 		}
 		if provider.capabilities != nil {
 			providers = append(providers, provider.capabilities())
 		}
 	}
-	return &pb.ListMailboxProviderCapabilitiesResponse{Providers: providers}
+	return &mailboxv1.ListMailboxProviderCapabilitiesResponse{Providers: providers}
 }
 
 func (c mailboxProviderRuntimeConfig) StoredInboxOnlyMailbox(email string) (*pb.EmailMailbox, bool) {
-	email = normalizeEmail(email)
+	email = emailx.Normalize(email)
 	if email == "" {
 		return nil, false
 	}
@@ -160,7 +163,7 @@ func (c mailboxProviderRuntimeConfig) StoredInboxOnlyMailbox(email string) (*pb.
 		}
 		mailbox := &pb.EmailMailbox{
 			EmailAddress: email,
-			Provider:     provider.key,
+			ProviderKey:  provider.key,
 			Domain:       domainForEmail(email),
 		}
 		prepareMailboxProjection(mailbox)
@@ -169,14 +172,14 @@ func (c mailboxProviderRuntimeConfig) StoredInboxOnlyMailbox(email string) (*pb.
 	return nil, false
 }
 
-func (c mailboxProviderRuntimeConfig) ProviderForInboxAddress(email string, messages []*pb.EmailInboxMessage) string {
+func (c mailboxProviderRuntimeConfig) ProviderForInboxAddress(email string, messages []*mailboxv1.EmailInboxMessage) string {
 	for _, message := range messages {
-		if provider := normalizeEmailProvider(message.GetProvider()); provider != "" {
+		if provider := normalizeEmailProvider(message.GetProviderKey()); provider != "" {
 			return provider
 		}
 	}
 	if mailbox, ok := c.StoredInboxOnlyMailbox(email); ok {
-		return mailbox.GetProvider()
+		return mailbox.GetProviderKey()
 	}
 	return defaultMailboxProvider()
 }
@@ -186,11 +189,12 @@ func (c mailboxProviderRuntimeConfig) IsStoredInboxOnlyAddress(email string) boo
 	return ok
 }
 
-func newMailboxActivitiesForProviders(cfg mailboxProviderRuntimeConfig, browserClient browserautomationv1.BrowserAutomationServiceClient, emailBackend emailBackend, operations *operationStore) *mailboxActivities {
+func newMailboxActivitiesForProviders(cfg mailboxProviderRuntimeConfig, browserClient browserautomationv1.BrowserAutomationServiceClient, emailBackend emailBackend, operations *operationStore, hot *mailboxHotStream) *mailboxActivities {
 	return &mailboxActivities{
 		outlookRegistration: newOutlookRegistrationRunner(cfg.registration, browserClient, nil),
 		emailBackend:        emailBackend,
 		operations:          operations,
+		hot:                 hot,
 	}
 }
 
@@ -218,15 +222,6 @@ func normalizeMailboxProviderInput(provider string) string {
 		return definition.key
 	}
 	return value
-}
-
-func providerByEnum(provider pb.MailboxProvider) *mailboxProviderPlugin {
-	for _, definition := range mailboxProviderPlugins() {
-		if definition.provider == provider {
-			return definition
-		}
-	}
-	return nil
 }
 
 func providerByKey(provider string) *mailboxProviderPlugin {
@@ -398,7 +393,7 @@ func prepareMailboxProjection(mailbox *pb.EmailMailbox) {
 	if mailbox == nil {
 		return
 	}
-	if definition := providerByKey(mailbox.GetProvider()); definition != nil && definition.prepareProjection != nil {
+	if definition := providerByKey(mailbox.GetProviderKey()); definition != nil && definition.prepareProjection != nil {
 		definition.prepareProjection(mailbox)
 	}
 }

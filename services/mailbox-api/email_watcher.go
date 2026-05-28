@@ -2,19 +2,23 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/byte-v-forge/common-lib/emailx"
+	"github.com/byte-v-forge/common-lib/envx"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
+	"github.com/byte-v-forge/common-lib/hashx"
+	"github.com/byte-v-forge/common-lib/httpx"
+	"github.com/byte-v-forge/common-lib/timex"
 
 	"mailboxapi/pb"
 )
@@ -31,8 +35,7 @@ type MailWatcher struct {
 	pollInterval int
 	inboxOverlap int
 	httpClient   *http.Client
-	outbound     *mailboxEventDispatcher
-	events       *mailboxEmailEventBus
+	events       *mailboxHotStream
 
 	mu            sync.Mutex
 	oauthManagers map[string]oauthEntry
@@ -60,34 +63,33 @@ func (e *GraphFetchError) Retryable() bool {
 	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= http.StatusInternalServerError
 }
 
-func NewMailWatcher(store *MailboxStore, events *mailboxEmailEventBus) *MailWatcher {
-	messageLimit := envInt("OUTLOOK_MESSAGE_LIMIT", defaultMessageLimit)
+func NewMailWatcher(store *MailboxStore, events *mailboxHotStream) *MailWatcher {
+	messageLimit := envx.Int("OUTLOOK_MESSAGE_LIMIT", defaultMessageLimit)
 	if messageLimit < 1 {
 		messageLimit = 1
 	}
 	if messageLimit > 100 {
 		messageLimit = 100
 	}
-	pollInterval := envInt("OUTLOOK_POLL_INTERVAL_SECONDS", defaultPollIntervalSeconds)
+	pollInterval := envx.Int("OUTLOOK_POLL_INTERVAL_SECONDS", defaultPollIntervalSeconds)
 	if pollInterval < 1 {
 		pollInterval = 1
 	}
-	inboxOverlap := envInt("OUTLOOK_INBOX_OVERLAP_SECONDS", defaultInboxOverlapSeconds)
+	inboxOverlap := envx.Int("OUTLOOK_INBOX_OVERLAP_SECONDS", defaultInboxOverlapSeconds)
 	if inboxOverlap < 0 {
 		inboxOverlap = 0
 	}
-	timeout := envInt("OUTLOOK_HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSeconds)
+	timeout := envx.Int("OUTLOOK_HTTP_TIMEOUT_SECONDS", defaultHTTPTimeoutSeconds)
 	if timeout <= 0 {
 		timeout = defaultHTTPTimeoutSeconds
 	}
 	return &MailWatcher{
 		store:         store,
-		graphURL:      envStr("OUTLOOK_GRAPH_MESSAGES_URL", defaultGraphMessagesURL),
+		graphURL:      envx.StringDefault("OUTLOOK_GRAPH_MESSAGES_URL", defaultGraphMessagesURL),
 		messageLimit:  messageLimit,
 		pollInterval:  pollInterval,
 		inboxOverlap:  inboxOverlap,
 		httpClient:    &http.Client{Timeout: time.Duration(timeout) * time.Second},
-		outbound:      newMailboxEventDispatcherFromEnv(),
 		events:        events,
 		oauthManagers: map[string]oauthEntry{},
 	}
@@ -106,11 +108,11 @@ func (w *MailWatcher) PollForEmail(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
-	w.DispatchMailboxEvents(unseen)
+	w.DispatchMailboxEvents(ctx, unseen)
 	return nil
 }
 
-func (w *MailWatcher) FetchMailboxInbox(ctx context.Context, mailbox *pb.EmailMailbox, limit int32, receivedAfterUnix int64) ([]*pb.EmailInboxMessage, error) {
+func (w *MailWatcher) FetchMailboxInbox(ctx context.Context, mailbox *pb.EmailMailbox, limit int32, receivedAfterUnix int64) ([]*mailboxv1.EmailInboxMessage, error) {
 	watermark, err := w.store.InboxWatermark(ctx, mailbox.GetEmailAddress())
 	if err != nil {
 		return nil, err
@@ -132,17 +134,16 @@ func (w *MailWatcher) FetchMailboxInbox(ctx context.Context, mailbox *pb.EmailMa
 	if err != nil {
 		return nil, err
 	}
-	w.DispatchMailboxEvents(unseen)
+	w.DispatchMailboxEvents(ctx, unseen)
 	return w.store.ListInboxMessagesSince(ctx, mailbox.GetEmailAddress(), int32(messageLimit), receivedAfterUnix)
 }
 
-func (w *MailWatcher) DispatchMailboxEvents(messages []*pb.EmailInboxMessage) {
+func (w *MailWatcher) DispatchMailboxEvents(ctx context.Context, messages []*mailboxv1.EmailInboxMessage) {
 	if len(messages) == 0 {
 		return
 	}
-	w.outbound.Dispatch(messages)
 	if w.events != nil {
-		w.events.Publish(messages)
+		w.events.PublishEmailMessages(ctx, messages)
 	}
 }
 
@@ -167,7 +168,7 @@ func (w *MailWatcher) fetchMailboxMessages(ctx context.Context, mailbox *pb.Emai
 		if !graphErr.IsAuth() {
 			return nil, err
 		}
-		logInfo("Graph auth error for %s; refreshing token and retrying", redactEmail(mailbox.GetEmailAddress()))
+		logInfo("Graph auth error for %s; refreshing token and retrying", emailx.Redact(mailbox.GetEmailAddress()))
 		accessToken, err = manager.RefreshAccessToken(ctx)
 		if err == nil {
 			err = w.persistTokens(ctx, mailbox, manager)
@@ -184,7 +185,7 @@ func (w *MailWatcher) fetchMailboxMessages(ctx context.Context, mailbox *pb.Emai
 }
 
 func (w *MailWatcher) oauthManagerForMailbox(mailbox *pb.EmailMailbox) *OAuthManager {
-	key := normalizeEmail(mailbox.GetEmailAddress())
+	key := emailx.Normalize(mailbox.GetEmailAddress())
 	refreshToken := strings.TrimSpace(mailbox.GetRefreshToken())
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -266,7 +267,7 @@ func (w *MailWatcher) fetchOnceREST(ctx context.Context, accessToken string, lim
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := httpx.ReadLimited(resp.Body, httpx.DefaultMaxBodyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +275,7 @@ func (w *MailWatcher) fetchOnceREST(ctx context.Context, accessToken string, lim
 		return nil, &GraphFetchError{
 			StatusCode: resp.StatusCode,
 			Body:       string(raw),
-			RetryAfter: retryAfter(resp.Header.Get("Retry-After")),
+			RetryAfter: httpx.RetryAfterMax(resp.Header, 10*time.Second),
 		}
 	}
 	var decoded graphMessagesResponse
@@ -284,30 +285,30 @@ func (w *MailWatcher) fetchOnceREST(ctx context.Context, accessToken string, lim
 	return decoded.Value, nil
 }
 
-func inboxMessages(mailboxEmail string, messages []graphMessage) []*pb.EmailInboxMessage {
-	out := make([]*pb.EmailInboxMessage, 0, len(messages))
+func inboxMessages(mailboxEmail string, messages []graphMessage) []*mailboxv1.EmailInboxMessage {
+	out := make([]*mailboxv1.EmailInboxMessage, 0, len(messages))
 	for _, msg := range messages {
 		out = append(out, inboxMessage(mailboxEmail, msg))
 	}
 	return out
 }
 
-func inboxMessage(mailboxEmail string, msg graphMessage) *pb.EmailInboxMessage {
+func inboxMessage(mailboxEmail string, msg graphMessage) *mailboxv1.EmailInboxMessage {
 	bodyPreview := strings.TrimSpace(msg.BodyPreview)
 	if bodyPreview == "" {
 		bodyPreview = compactMessageText(msg.Body.Content, 500)
 	}
 	body := msg.BodyPreview + "\n" + msg.Body.Content
-	return &pb.EmailInboxMessage{
+	return &mailboxv1.EmailInboxMessage{
 		Id:                 msg.ID,
-		MailboxEmail:       normalizeEmail(mailboxEmail),
+		MailboxEmail:       emailx.Normalize(mailboxEmail),
 		Subject:            strings.TrimSpace(msg.Subject),
 		FromAddress:        strings.TrimSpace(msg.From.EmailAddress.Address),
 		BodyPreview:        compactMessageText(bodyPreview, 500),
-		ReceivedAtUnix:     int64(parseGraphTime(msg.ReceivedDateTime)),
+		ReceivedAtUnix:     int64(timex.UnixFloat(msg.ReceivedDateTime)),
 		Recipients:         uniqueStrings(messageAddresses(msg)),
-		Provider:           emailProviderOutlook,
-		SourceMailboxEmail: normalizeEmail(mailboxEmail),
+		ProviderKey:        emailProviderOutlook,
+		SourceMailboxEmail: emailx.Normalize(mailboxEmail),
 		BodyText:           compactMessageText(body, 5000),
 	}
 }
@@ -328,7 +329,7 @@ func uniqueStrings(values []string) []string {
 	seen := map[string]struct{}{}
 	out := []string{}
 	for _, value := range values {
-		trimmed := normalizeEmail(value)
+		trimmed := emailx.Normalize(value)
 		if trimmed == "" {
 			continue
 		}
@@ -366,20 +367,6 @@ func inboxReceivedAfter(watermarkNs int64, overlapSeconds int) int64 {
 	return after
 }
 
-func retryAfter(value string) time.Duration {
-	if strings.TrimSpace(value) == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || n <= 0 {
-		return 0
-	}
-	if n > 10 {
-		n = 10
-	}
-	return time.Duration(n) * time.Second
-}
-
 func messageKey(msg graphMessage) string {
 	if msg.ID != "" {
 		return msg.ID
@@ -388,8 +375,7 @@ func messageKey(msg graphMessage) string {
 	if err != nil {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+	return hashx.SHA256Hex(string(raw))
 }
 
 func messageAddresses(msg graphMessage) []string {

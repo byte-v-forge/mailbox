@@ -1,5 +1,5 @@
 import { Inbox } from 'lucide-react';
-import { DashboardNavSection, type DashboardModuleRegistration } from '@/dashboard/module-kit';
+import { DashboardNavSection, type DashboardModuleRegistration } from '@byte-v-forge/common-ui';
 import { MailboxPage } from './mailbox-page';
 
 const registration: DashboardModuleRegistration = {
@@ -10,7 +10,7 @@ const registration: DashboardModuleRegistration = {
         key: 'mailboxes',
         label: '邮箱管理',
         icon: 'mailbox',
-        section: DashboardNavSection.DASHBOARD_NAV_SECTION_MAIN,
+        section: DashboardNavSection.DASHBOARD_NAV_SECTION_INFRASTRUCTURE,
         required_services: ['mailbox'],
         order: 20
       }

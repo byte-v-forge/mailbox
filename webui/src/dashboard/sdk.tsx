@@ -11,7 +11,7 @@ export {
   signalLabel,
   verificationCodeForMessage
 } from './mailbox-signal-utils';
-export type { MailboxEmailEvent, MailboxEmailEventCacheOptions } from './mailbox-events';
+export type { MailboxEmailEventCacheOptions } from './mailbox-events';
 export type {
   EmailSignal,
   InboxMessage,

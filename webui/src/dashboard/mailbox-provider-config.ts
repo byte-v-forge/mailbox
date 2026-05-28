@@ -1,4 +1,3 @@
-import { MailboxProvider } from '@/proto/mailbox_service';
 import type { Mailbox } from './types';
 
 export type MailboxProviderTab = 'outlook' | 'cloudflare';
@@ -7,7 +6,7 @@ export type MailboxCredentialField = 'password' | 'refresh_token' | 'access_toke
 export type MailboxProviderUIConfig = {
   value: MailboxProviderTab;
   label: string;
-  provider: MailboxProvider;
+  providerKey: string;
   aliases: string[];
   showStatus: boolean;
   tokenText?: string | ((mailbox: Mailbox) => string);
@@ -22,7 +21,7 @@ export type MailboxProviderUIConfig = {
 export const mailboxProviderConfigs = [{
   value: 'outlook',
   label: 'Outlook',
-  provider: MailboxProvider.MAILBOX_PROVIDER_OUTLOOK,
+  providerKey: 'outlook',
   aliases: ['microsoft', 'graph'],
   showStatus: true,
   import: {
@@ -34,7 +33,7 @@ export const mailboxProviderConfigs = [{
 }, {
   value: 'cloudflare',
   label: 'Cloudflare',
-  provider: MailboxProvider.MAILBOX_PROVIDER_CLOUDFLARE,
+  providerKey: 'cloudflare',
   aliases: ['cf'],
   showStatus: false,
   tokenText: 'Webhook',
@@ -46,13 +45,23 @@ export function mailboxProviderConfig(provider: string): MailboxProviderUIConfig
 }
 
 export function mailboxProviderValue(provider: string): MailboxProviderTab {
+  return mailboxProviderTabFor(provider) || 'outlook';
+}
+
+export function mailboxProviderMatches(provider: string, target: MailboxProviderTab) {
+  return mailboxProviderTabFor(provider) === target;
+}
+
+export function mailboxProviderTabFor(provider: string): MailboxProviderTab | undefined {
+  return mailboxProviderConfigFor(provider)?.value;
+}
+
+function mailboxProviderConfigFor(provider: string) {
   const normalized = String(provider || '').trim().toLowerCase();
-  const matched = mailboxProviderConfigs.find((item) => (
+  return mailboxProviderConfigs.find((item) => (
     normalized === item.value ||
     String(item.label).toLowerCase() === normalized ||
-    item.provider.toLowerCase() === normalized ||
+    item.providerKey === normalized ||
     item.aliases.includes(normalized)
   ));
-  if (matched) return matched.value;
-  return 'outlook';
 }

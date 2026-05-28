@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/byte-v-forge/common-lib/envx"
+	mailboxv1 "github.com/byte-v-forge/common-lib/gen/go/byte/v/forge/contracts/mailbox/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -14,33 +16,31 @@ func cloudflareMailboxProvider() *mailboxProviderPlugin {
 	return &mailboxProviderPlugin{
 		key:             emailProviderCloudflare,
 		aliases:         []string{"cf", "cloudflare-email-relay"},
-		provider:        pb.MailboxProvider_MAILBOX_PROVIDER_CLOUDFLARE,
 		displayName:     "Cloudflare",
 		storedInboxOnly: true,
-		capabilities: func() *pb.MailboxProviderCapabilities {
-			return &pb.MailboxProviderCapabilities{
-				Provider:    pb.MailboxProvider_MAILBOX_PROVIDER_CLOUDFLARE,
+		capabilities: func() *mailboxv1.MailboxProviderCapabilities {
+			return &mailboxv1.MailboxProviderCapabilities{
 				Key:         emailProviderCloudflare,
 				DisplayName: "Cloudflare",
-				Actions: []*pb.MailboxProviderActionCapability{
-					{Action: pb.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_RECEIVE_WEBHOOK},
-					{Action: pb.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_AUTO_CREATE_MAILBOX},
-					{Action: pb.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_SYNC_DOMAINS},
+				Actions: []*mailboxv1.MailboxProviderActionCapability{
+					{Action: mailboxv1.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_RECEIVE_WEBHOOK},
+					{Action: mailboxv1.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_AUTO_CREATE_MAILBOX},
+					{Action: mailboxv1.MailboxProviderAction_MAILBOX_PROVIDER_ACTION_SYNC_DOMAINS},
 				},
-				RetentionPolicy: &pb.MailboxMessageRetentionPolicy{
-					Scope:       pb.MailboxMessageRetentionScope_MAILBOX_MESSAGE_RETENTION_SCOPE_DOMAIN,
-					MaxMessages: int32(envInt("MAILBOX_CLOUDFLARE_MAX_MESSAGES_PER_DOMAIN", defaultCloudflareMaxDomain)),
+				RetentionPolicy: &mailboxv1.MailboxMessageRetentionPolicy{
+					Scope:       mailboxv1.MailboxMessageRetentionScope_MAILBOX_MESSAGE_RETENTION_SCOPE_DOMAIN,
+					MaxMessages: int32(envx.Int("MAILBOX_CLOUDFLARE_MAX_MESSAGES_PER_DOMAIN", defaultCloudflareMaxDomain)),
 				},
 			}
 		},
 		loadDomains: loadCloudflareEmailDomains,
-		domains: func(configured []string) []*pb.MailboxDomain {
-			domains := make([]*pb.MailboxDomain, 0, len(configured))
+		domains: func(configured []string) []*mailboxv1.MailboxDomain {
+			domains := make([]*mailboxv1.MailboxDomain, 0, len(configured))
 			for _, domain := range configured {
-				domains = append(domains, &pb.MailboxDomain{
-					Provider: pb.MailboxProvider_MAILBOX_PROVIDER_CLOUDFLARE,
-					Domain:   domain,
-					Enabled:  true,
+				domains = append(domains, &mailboxv1.MailboxDomain{
+					ProviderKey: emailProviderCloudflare,
+					Domain:      domain,
+					Enabled:     true,
 				})
 			}
 			return domains
@@ -59,7 +59,7 @@ func cloudflareMailboxProvider() *mailboxProviderPlugin {
 		},
 		pruneInbound: func(ctx context.Context, tx pgx.Tx, retention mailboxInboxRetention) error {
 			for domain := range retention.touchedDomains {
-				if err := pruneDomainMessages(ctx, tx, emailProviderCloudflare, domain, envInt("MAILBOX_CLOUDFLARE_MAX_MESSAGES_PER_DOMAIN", defaultCloudflareMaxDomain)); err != nil {
+				if err := pruneDomainMessages(ctx, tx, emailProviderCloudflare, domain, envx.Int("MAILBOX_CLOUDFLARE_MAX_MESSAGES_PER_DOMAIN", defaultCloudflareMaxDomain)); err != nil {
 					return err
 				}
 			}
